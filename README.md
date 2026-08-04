@@ -4,11 +4,23 @@ Recover a [Chia Cloud Wallet](https://www.chia.net/) vault using the BIP39 recov
 
 Licensed under the [Apache License 2.0](LICENSE).
 
+## What you need
+
+This tool **requires** a Cloud Wallet **vault configuration file** (`vault-config-*.json`). A vault address alone is not enough.
+
+You must have:
+
+1. **Vault config JSON** — public vault layout: launcher id, custody and recovery public keys, thresholds, and clawback timelock. Many users already have this from when the vault was created (Cloud Wallet prompts you to download it). Keep a copy with your backups; it does not contain private keys or your recovery phrase.
+2. **Recovery passphrase** — the 24-word phrase Cloud Wallet gave you for vault recovery (signs delayed recovery).
+3. **A new custody mnemonic** — 24 words by default (12 optional); this becomes the post-recovery spend key. The tool can auto-generate a second mnemonic for the new recovery branch.
+
+You also need network access (coinset by default, or a full node) to find the vault singleton and broadcast transactions.
+
 ## What it does
 
 Cloud Wallet vaults are MIPS 1-of-2 singletons (custody | recovery). This tool runs **delayed (timelocked) recovery**:
 
-1. **inspect** — match a Cloud Wallet `vault-config-*.json` to the on-chain singleton
+1. **inspect** — match your `vault-config-*.json` to the on-chain singleton
 2. **start** — sign with the recovery phrase; vault enters RECOVERY (custody can still claw back with the old passkey)
 3. wait for `clawbackTimelock` seconds (often 43200 / 12h)
 4. **finish** — permissionless rekey to the new custody configuration
@@ -60,7 +72,7 @@ Mnemonics may also be passed via env: `CHIA_VAULT_RECOVERY_MNEMONIC`, `CHIA_VAUL
 chia-vault-recover-gui
 ```
 
-Load the vault config, paste mnemonics, Inspect / Start / Finish. After Start, copy the generated recovery mnemonic with the clipboard button.
+Load the vault config file, paste mnemonics, then Inspect / Start / Finish. After Start, copy the generated recovery mnemonic with the clipboard button.
 
 ## Key derivation (Cloud Wallet compatible)
 
@@ -80,8 +92,8 @@ cargo test --all
 
 ### Manual testnet11 recipe
 
-1. Export vault-config from a testnet Cloud Wallet vault (or restore one).
-2. Fund nothing extra if fee=0; ensure the vault singleton is unspent.
+1. Use a saved `vault-config-*.json` for a testnet vault (from vault creation / download).
+2. Ensure the vault singleton is unspent (zero-fee spends only).
 3. Run against testnet:
 
 ```bash
