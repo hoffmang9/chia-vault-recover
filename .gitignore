@@ -1,0 +1,6 @@
+/target
+.DS_Store
+*.swp
+post-recovery-vault-config.json
+*.mnemonic
+.env

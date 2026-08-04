@@ -1,0 +1,60 @@
+[package]
+name = "chia-vault-recover"
+version = "0.1.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "Recover a Chia Cloud Wallet vault using a recovery passphrase"
+authors = ["Gene Hoffman"]
+repository = "https://github.com/hoffmang/chia-vault-recover"
+readme = "README.md"
+keywords = ["chia", "vault", "recovery"]
+categories = ["cryptography::cryptocurrencies", "command-line-utilities"]
+
+[lib]
+name = "chia_vault_recover"
+path = "src/lib.rs"
+
+[[bin]]
+name = "chia-vault-recover"
+path = "src/bin/cli.rs"
+
+[[bin]]
+name = "chia-vault-recover-gui"
+path = "src/bin/gui.rs"
+
+[dependencies]
+anyhow = "1"
+bip39 = { version = "2.2", features = ["rand"] }
+chia-bls = "0.36"
+chia-consensus = "0.36"
+chia-protocol = "0.36"
+chia-puzzle-types = "0.36"
+chia-puzzles = "0.20"
+chia-sdk-coinset = { version = "0.34", features = ["rustls"] }
+chia-sdk-driver = "0.34"
+chia-sdk-types = "0.34"
+chia-secp = "0.36"
+chia-sha2 = "0.36"
+clap = { version = "4", features = ["derive", "env"] }
+clvm-traits = "0.36"
+clvm-utils = "0.36"
+clvmr = "0.16"
+eframe = { version = "0.31", default-features = true }
+egui = "0.31"
+hex = "0.4"
+rand = "0.8"
+rfd = "0.15"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "2"
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+
+[dev-dependencies]
+chia-sdk-test = "0.34"
+hex-literal = "0.4"
+rstest = "0.25"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true

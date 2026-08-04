@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  release:
+    types: [published]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+
+jobs:
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux GUI/build deps
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --all-targets -- -D warnings
+
+  test:
+    name: Test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install Linux deps
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config
+      - run: cargo test --all
+
+  build:
+    name: Build (${{ matrix.name }})
+    needs: [lint, test]
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact: linux-x86_64
+          - name: linux-aarch64
+            os: ubuntu-latest
+            target: aarch64-unknown-linux-gnu
+            artifact: linux-aarch64
+            cross: true
+          - name: windows-x86_64
+            os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact: windows-x86_64
+          - name: macos-universal
+            os: macos-latest
+            target: universal-apple-darwin
+            artifact: macos-universal
+            universal: true
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.universal && 'aarch64-apple-darwin,x86_64-apple-darwin' || matrix.target }}
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: ${{ matrix.name }}
+
+      - name: Install Linux deps (native)
+        if: runner.os == 'Linux' && !matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libgtk-3-dev libxcb-render0-dev libxcb-shape0-dev libxcb-xfixes0-dev libxkbcommon-dev libssl-dev pkg-config
+
+      - name: Install Linux aarch64 cross toolchain
+        if: matrix.cross
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu g++-aarch64-linux-gnu
+          # GUI crate needs display libs; for aarch64 cross-build CLI only if GUI fails.
+          # Prefer building both with pkg-config disabled for egui optional path — build release both bins.
+          rustup target add aarch64-unknown-linux-gnu
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> "$GITHUB_ENV"
+
+      - name: Build (native)
+        if: ${{ !matrix.universal && !matrix.cross }}
+        run: cargo build --release --target ${{ matrix.target }}
+
+      - name: Build (linux aarch64)
+        if: matrix.cross
+        run: |
+          # Build CLI always; GUI may need extra cross libs — try both, fall back to CLI-only for GUI failure.
+          cargo build --release --target aarch64-unknown-linux-gnu --bin chia-vault-recover
+          cargo build --release --target aarch64-unknown-linux-gnu --bin chia-vault-recover-gui || \
+            echo "GUI cross-build skipped/failed; CLI artifact still produced"
+
+      - name: Build macOS universal
+        if: matrix.universal
+        run: |
+          cargo build --release --target aarch64-apple-darwin
+          cargo build --release --target x86_64-apple-darwin
+          mkdir -p dist
+          lipo -create \
+            target/aarch64-apple-darwin/release/chia-vault-recover \
+            target/x86_64-apple-darwin/release/chia-vault-recover \
+            -output dist/chia-vault-recover
+          lipo -create \
+            target/aarch64-apple-darwin/release/chia-vault-recover-gui \
+            target/x86_64-apple-darwin/release/chia-vault-recover-gui \
+            -output dist/chia-vault-recover-gui
+          chmod +x dist/*
+
+      - name: Stage artifacts (non-universal)
+        if: ${{ !matrix.universal }}
+        shell: bash
+        run: |
+          mkdir -p dist
+          EXT=""
+          if [[ "${{ runner.os }}" == "Windows" ]]; then EXT=".exe"; fi
+          TARGET_DIR="target/${{ matrix.target }}/release"
+          cp "$TARGET_DIR/chia-vault-recover${EXT}" "dist/chia-vault-recover${EXT}"
+          if [[ -f "$TARGET_DIR/chia-vault-recover-gui${EXT}" ]]; then
+            cp "$TARGET_DIR/chia-vault-recover-gui${EXT}" "dist/chia-vault-recover-gui${EXT}"
+          fi
+
+      - name: Upload CI artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: chia-vault-recover-${{ matrix.artifact }}
+          path: dist/*
+          if-no-files-found: error
+
+      - name: Upload release assets
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
