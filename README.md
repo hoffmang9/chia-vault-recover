@@ -10,7 +10,7 @@ This tool **requires** a Cloud Wallet **vault configuration file** (`vault-confi
 
 You must have:
 
-1. **Vault config JSON** — public vault layout: launcher id, custody and recovery public keys, thresholds, and clawback timelock. Many users already have this from when the vault was created (Cloud Wallet prompts you to download it). Keep a copy with your backups; it does not contain private keys or your recovery phrase.
+1. **Vault config JSON** — public vault layout: launcher id, custody and recovery public keys, thresholds, and clawback timelock. See [Download your vault config](#download-your-vault-config). Keep a copy with your backups; it does not contain private keys or your recovery phrase.
 2. **Recovery passphrase** — the 24-word phrase Cloud Wallet gave you for vault recovery (signs delayed recovery).
 3. **A new custody mnemonic** — 24 words by default (12 optional); this becomes the post-recovery spend key. The tool can auto-generate a second mnemonic for the new recovery branch.
 
@@ -26,6 +26,25 @@ Cloud Wallet vaults are MIPS 1-of-2 singletons (custody | recovery). This tool r
 4. **finish** — permissionless rekey to the new custody configuration
 
 Default destination: new **24-word** BLS custody + an **auto-generated** second BLS recovery mnemonic (12-word option available). The generated recovery mnemonic is shown once (CLI print / GUI clipboard) and is **not** written into the public post-recovery config file.
+
+## Download your vault config
+
+A **Download Config** button is coming soon to [vault.chia.net](https://vault.chia.net). Until then, export the file from a logged-in Cloud Wallet tab.
+
+The file is public vault layout only. It does **not** include your recovery passphrase or any private key.
+
+1. Log in at [vault.chia.net](https://vault.chia.net) (or the testnet Cloud Wallet host).
+2. Open the vault you want. To export every vault, stay on the vaults list.
+3. Open DevTools → Console (macOS: Option-Command-J; Windows/Linux: Ctrl+Shift+J).
+4. Paste the contents of [`scripts/download-vault-config.js`](scripts/download-vault-config.js) and press Enter.
+5. The browser downloads `vault-config-*.json`. Store it with your backups.
+6. Confirm it matches the chain before recovery:
+
+```bash
+chia-vault-recover inspect --config vault-config.json
+```
+
+Only paste that script on the Cloud Wallet site while you are logged in. It uses your existing session to read vault public keys from the same GraphQL API the page already calls.
 
 ## Install / build
 
@@ -92,7 +111,7 @@ cargo test --all
 
 ### Manual testnet11 recipe
 
-1. Use a saved `vault-config-*.json` for a testnet vault (from vault creation / download).
+1. Use a saved `vault-config-*.json` for a testnet vault (see [Download your vault config](#download-your-vault-config)).
 2. Ensure the vault singleton is unspent (zero-fee spends only).
 3. Run against testnet:
 
