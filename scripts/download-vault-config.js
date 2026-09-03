@@ -1,5 +1,5 @@
 /**
- * Fallback: download Cloud Wallet vault-config JSON from a logged-in tab.
+ * Fallback: download Cloud Wallet vault-config JSON from a logged-in vault page.
  *
  * Prefer chia-vault-recover lookup --vault xch1… first. You only need this
  * file if lookup says the vault has not yet published its layout on chain
@@ -7,21 +7,25 @@
  * vault.chia.net.
  *
  * Cloud Wallet does not yet expose a download button. Paste this file
- * into the browser console while logged in.
+ * into the browser console while logged in on a vault.
  *
  * Usage:
  *   1. Log in at https://vault.chia.net (or the testnet Cloud Wallet host).
- *   2. Open the vault you want, or stay on the vaults list to export all.
+ *   2. Open the vault you want to export.
  *   3. Open DevTools → Console (macOS: ⌥⌘J, Windows/Linux: Ctrl+Shift+J).
  *   4. Paste this entire file and press Enter.
- *   5. One download: vault-config-*.json for a single vault, or
- *      vault-configs.json ({ vaults: [...] }) for the whole list.
- *      Public keys and layout only — not your recovery phrase.
+ *   5. The browser downloads one vault-config-*.json (public layout only —
+ *      not your recovery phrase).
  *
- * Then verify before recovery (single-vault file):
+ * Then verify before recovery:
  *   chia-vault-recover inspect --config vault-config-….json
  */
 (async () => {
+  const walletId = location.pathname.match(/\/wallet\/(Wallet_[^/]+)/)?.[1];
+  if (!walletId) {
+    throw new Error('Open a vault at vault.chia.net, then run this again.');
+  }
+
   const hex = (value, label) => {
     if (value == null) {
       throw new Error(`missing ${label}`);
@@ -72,67 +76,44 @@
     return body.data;
   };
 
-  const vaultFields = `
-    id
-    name
-    custodyConfig {
-      vaultCustodyConfig {
-        vaultLauncherId
-        custodyThreshold
-        recoveryThreshold
-        recoveryClawbackTimelock
-        custodyKeys { edges { node { publicKey curve } } }
-        recoveryKeys { edges { node { publicKey curve } } }
-        custodyAuthorizedWallets {
-          edges { node { custodyConfig { vaultCustodyConfig { vaultLauncherId } } } }
-        }
-        recoveryAuthorizedWallets {
-          edges { node { custodyConfig { vaultCustodyConfig { vaultLauncherId } } } }
-        }
-      }
-    }
-  `;
-
-  const connectionEdges = (connection, field, walletId) => {
+  const connectionEdges = (connection, field, id) => {
     if (connection == null) {
       return [];
     }
     if (!Array.isArray(connection.edges)) {
-      throw new Error(`Incomplete vault configuration for ${walletId}: missing ${field}`);
+      throw new Error(`Incomplete vault configuration for ${id}: missing ${field}`);
     }
     return connection.edges;
   };
 
-  const membersFrom = (keys, authorized, walletId) => {
-    const keyMembers = connectionEdges(keys, 'key connection', walletId).map(({ node }) => {
+  const membersFrom = (keys, authorized, id) => {
+    const keyMembers = connectionEdges(keys, 'key connection', id).map(({ node }) => {
       if (node?.publicKey == null || node?.curve == null) {
-        throw new Error(
-          `Incomplete vault configuration for ${walletId}: key missing publicKey/curve`,
-        );
+        throw new Error(`Incomplete vault configuration for ${id}: key missing publicKey/curve`);
       }
       return {
         type: 'publicKey',
-        publicKey: hex(node.publicKey, `publicKey for ${walletId}`),
+        publicKey: hex(node.publicKey, `publicKey for ${id}`),
         curve: node.curve,
       };
     });
-    const vaultMembers = connectionEdges(authorized, 'authorized-wallet connection', walletId)
+    const vaultMembers = connectionEdges(authorized, 'authorized-wallet connection', id)
       .map(({ node }) => node?.custodyConfig?.vaultCustodyConfig?.vaultLauncherId)
-      .filter((id) => id != null)
+      .filter((launcherId) => launcherId != null)
       .map((launcherId) => ({
         type: 'vault',
-        launcherId: hex(launcherId, `authorized launcher for ${walletId}`),
+        launcherId: hex(launcherId, `authorized launcher for ${id}`),
       }));
     return [...keyMembers, ...vaultMembers];
   };
 
   const configFromWallet = (wallet) => {
     if (wallet?.id == null) {
-      return null;
+      throw new Error(`Wallet ${walletId} was not in this account. Open that vault while logged in.`);
     }
     const vault = wallet.custodyConfig?.vaultCustodyConfig;
     if (vault?.vaultLauncherId == null) {
-      return null;
+      throw new Error(`Incomplete vault configuration for ${wallet.id}: missing launcher id`);
     }
     if (vault.custodyThreshold == null) {
       throw new Error(`Incomplete vault configuration for ${wallet.id}: missing custodyThreshold`);
@@ -163,92 +144,39 @@
     };
   };
 
-  const downloadJson = (filename, value) => {
-    const blob = new Blob([JSON.stringify(value, null, 2)], { type: 'application/json' });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = filename;
-    link.click();
-    URL.revokeObjectURL(link.href);
-  };
-
-  const fromUrl = location.pathname.match(/\/wallet\/(Wallet_[^/]+)/)?.[1];
-  const wallets = [];
-  let after = null;
-  for (;;) {
-    const variables = { first: 50 };
-    if (after) {
-      variables.after = after;
-    }
-    const data = await gql(
-      `query VaultConfigAssemble($first: Int!, $after: String) {
-        viewer {
-          wallets(first: $first, after: $after) {
-            pageInfo { hasNextPage endCursor }
-            edges { node { ${vaultFields} } }
+  const data = await gql(
+    `query VaultConfigAssemble($id: ID!) {
+      wallet(id: $id) {
+        id
+        name
+        custodyConfig {
+          vaultCustodyConfig {
+            vaultLauncherId
+            custodyThreshold
+            recoveryThreshold
+            recoveryClawbackTimelock
+            custodyKeys { edges { node { publicKey curve } } }
+            recoveryKeys { edges { node { publicKey curve } } }
+            custodyAuthorizedWallets {
+              edges { node { custodyConfig { vaultCustodyConfig { vaultLauncherId } } } }
+            }
+            recoveryAuthorizedWallets {
+              edges { node { custodyConfig { vaultCustodyConfig { vaultLauncherId } } } }
+            }
           }
         }
-      }`,
-      variables,
-    );
-    const connection = data.viewer?.wallets;
-    if (connection == null) {
-      throw new Error('Not signed in. Log in at vault.chia.net and run this again.');
-    }
-    if (!Array.isArray(connection.edges)) {
-      throw new Error('Incomplete wallet list from GraphQL (missing wallets.edges)');
-    }
-    for (const edge of connection.edges) {
-      if (edge?.node) {
-        wallets.push(edge.node);
       }
-    }
-    if (fromUrl && wallets.some((wallet) => wallet.id === fromUrl)) {
-      break;
-    }
-    if (!connection.pageInfo?.hasNextPage || !connection.pageInfo.endCursor) {
-      break;
-    }
-    after = connection.pageInfo.endCursor;
-  }
-
-  const selected = fromUrl ? wallets.filter((wallet) => wallet.id === fromUrl) : wallets;
-  if (fromUrl && selected.length === 0) {
-    throw new Error(
-      `Wallet ${fromUrl} was not in this account. Open that vault while logged in and run this again.`,
-    );
-  }
-
-  const configs = [];
-  for (const wallet of selected) {
-    const config = configFromWallet(wallet);
-    if (config) {
-      configs.push(config);
-    } else if (fromUrl) {
-      throw new Error(`Incomplete vault configuration for ${fromUrl}: missing launcher id`);
-    }
-  }
-
-  if (!configs.length) {
-    throw new Error(
-      'No vaults found. Log in at vault.chia.net, open a vault or the vaults list, and run this again.',
-    );
-  }
-
-  if (configs.length === 1) {
-    downloadJson(configs[0].filename, configs[0].json);
-  } else {
-    downloadJson(
-      'vault-configs.json',
-      { vaults: configs.map((config) => config.json) },
-    );
-    console.warn(
-      'Downloaded vault-configs.json (one file). inspect --config needs a single vault object: copy one entry from vaults[] into its own file.',
-    );
-  }
-
-  console.table(
-    configs.map((config) => ({ file: config.filename, launcherId: config.json.launcherId })),
+    }`,
+    { id: walletId },
   );
-  return configs;
+
+  const { filename, json } = configFromWallet(data.wallet);
+  const blob = new Blob([JSON.stringify(json, null, 2)], { type: 'application/json' });
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = filename;
+  link.click();
+  URL.revokeObjectURL(link.href);
+  console.table([{ file: filename, launcherId: json.launcherId }]);
+  return json;
 })();
