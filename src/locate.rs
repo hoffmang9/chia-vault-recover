@@ -19,7 +19,6 @@ use crate::network::{Backend, Network};
 pub struct ResolvedLauncher {
     pub launcher_id: Bytes32,
     pub source: String,
-    pub inferred_network: Option<Network>,
 }
 
 /// Parse a vault address (`xch1…` / `txch1…`) or a 32-byte launcher id.
@@ -75,7 +74,6 @@ pub async fn resolve_launcher_id(
         VaultLocator::LauncherId(id) => Ok(Some(ResolvedLauncher {
             launcher_id: *id,
             source: format!("launcher id 0x{}", hex::encode(id)),
-            inferred_network: None,
         })),
         VaultLocator::Address {
             original,
@@ -86,7 +84,6 @@ pub async fn resolve_launcher_id(
             .map(|id| ResolvedLauncher {
                 launcher_id: id,
                 source: format!("address {original}"),
-                inferred_network: locator.inferred_network(),
             })),
     }
 }
