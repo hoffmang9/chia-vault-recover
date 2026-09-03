@@ -411,7 +411,6 @@ impl App {
             Ok::<(), chia_vault_recover::Error>(())
         })();
         if let Err(e) = result {
-            self.step = AppStep::NeedLookup;
             self.status = format!("Lookup error: {e}");
         }
     }

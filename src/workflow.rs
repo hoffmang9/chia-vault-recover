@@ -192,11 +192,8 @@ pub enum LookupReport {
 /// Address-first lookup: resolve launcher and a prior custody spend.
 pub async fn lookup(client: &ChainClient, vault: &str) -> Result<LookupReport> {
     let locator = parse_vault_locator(vault)?;
-    let resolved = match resolve_launcher_id(client, &locator).await {
-        Ok(resolved) => resolved,
-        Err(_) => {
-            return Ok(LookupReport::NeedFallback(LookupGap::LauncherNotFound));
-        }
+    let Some(resolved) = resolve_launcher_id(client, &locator).await? else {
+        return Ok(LookupReport::NeedFallback(LookupGap::LauncherNotFound));
     };
 
     let (spent, current) = client.walk_singleton_chain(resolved.launcher_id).await?;

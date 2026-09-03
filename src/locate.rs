@@ -11,7 +11,7 @@ use clvmr::NodePtr;
 use crate::address::{decode_address, network_from_address_prefix};
 use crate::chain::ChainClient;
 use crate::config::parse_bytes32;
-use crate::error::{Error, Result};
+use crate::error::Result;
 use crate::mips::{CloudWalletP2, alloc_spend};
 use crate::network::{Backend, Network};
 
@@ -70,51 +70,42 @@ pub fn client_for_vault(
 pub async fn resolve_launcher_id(
     client: &ChainClient,
     locator: &VaultLocator,
-) -> Result<ResolvedLauncher> {
+) -> Result<Option<ResolvedLauncher>> {
     match locator {
-        VaultLocator::LauncherId(id) => Ok(ResolvedLauncher {
+        VaultLocator::LauncherId(id) => Ok(Some(ResolvedLauncher {
             launcher_id: *id,
             source: format!("launcher id 0x{}", hex::encode(id)),
             inferred_network: None,
-        }),
+        })),
         VaultLocator::Address {
             original,
             puzzle_hash,
             ..
-        } => {
-            let id = launcher_from_puzzle_hash(client, *puzzle_hash).await?;
-            Ok(ResolvedLauncher {
+        } => Ok(launcher_from_puzzle_hash(client, *puzzle_hash)
+            .await?
+            .map(|id| ResolvedLauncher {
                 launcher_id: id,
                 source: format!("address {original}"),
                 inferred_network: locator.inferred_network(),
-            })
-        }
+            })),
     }
 }
 
-async fn launcher_from_puzzle_hash(client: &ChainClient, puzzle_hash: Bytes32) -> Result<Bytes32> {
+async fn launcher_from_puzzle_hash(
+    client: &ChainClient,
+    puzzle_hash: Bytes32,
+) -> Result<Option<Bytes32>> {
     let exact = client.find_coins_by_puzzle_hash(puzzle_hash, true).await?;
     if let Some(id) = launcher_from_records(client, &exact).await? {
-        return Ok(id);
+        return Ok(Some(id));
     }
 
     let hinted = client.find_coins_by_hint(puzzle_hash, true).await?;
     if let Some(id) = launcher_from_records(client, &hinted).await? {
-        return Ok(id);
+        return Ok(Some(id));
     }
 
-    if exact.is_empty() && hinted.is_empty() {
-        return Err(Error::msg(
-            "no coins found at this address (or hinted to it). \
-             The address may be unused, or you are on the wrong network",
-        ));
-    }
-
-    Err(Error::msg(
-        "found coins at this address but none revealed a vault launcher id. \
-         Spend from the vault once (or use a previously spent vault address), \
-         or pass the launcher id from a vault-config file",
-    ))
+    Ok(None)
 }
 
 async fn launcher_from_records(
