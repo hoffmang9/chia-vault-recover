@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use chia_vault_recover::chain::ChainClient;
 use chia_vault_recover::config::VaultConfig;
-use chia_vault_recover::discover::{FoundVault, ReconstructedVault};
+use chia_vault_recover::discover::{FoundVault, ReconstructedVault, reconstruct};
 use chia_vault_recover::guidance::{
     LOOKUP_CAN_RECOVER, fallback_guidance, reconstruct_success_guidance,
 };
@@ -11,7 +11,7 @@ use chia_vault_recover::keys::MnemonicWordCount;
 use chia_vault_recover::locate::client_for_vault;
 use chia_vault_recover::network::{Backend, Network};
 use chia_vault_recover::recovery::{StartRecoveryResult, VaultPhase};
-use chia_vault_recover::workflow::{self, LookupReport, StartFromFound, StartWorkflow};
+use chia_vault_recover::workflow::{self, LookupReport, StartWorkflow};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
@@ -201,63 +201,42 @@ async fn main() -> Result<()> {
                 24 => MnemonicWordCount::Words24,
                 _ => bail!("word_count must be 12 or 24"),
             };
-            match (vault, config) {
+            let (client, network, config) = match (vault, config) {
                 (Some(_), Some(_)) => {
                     bail!("pass --vault <xch1…> or --config <vault-config.json>, not both")
                 }
                 (Some(vault), None) => {
                     let (client, network) = client_for(&vault, network, backend)?;
-                    let report = workflow::lookup(&client, &vault).await?;
-                    let found = match report {
-                        LookupReport::Found(found) => found,
-                        LookupReport::NeedFallback(gap) => {
-                            print_fallback(network, &gap);
-                            bail!("cannot start recovery until lookup finds a custody spend");
-                        }
-                    };
-                    let (rebuilt, result) = workflow::start_from_found(
-                        &client,
-                        StartFromFound {
-                            found: &found,
-                            recovery_mnemonic: &recovery_mnemonic,
-                            new_custody_mnemonic: &new_custody_mnemonic,
-                            new_recovery_mnemonic: new_recovery_mnemonic.as_deref(),
-                            clawback_secs,
-                            new_clawback_timelock: new_clawback_secs,
-                            new_word_count: word_count,
-                            network,
-                            out_config: &out_config,
-                            lookup_config: &lookup_config,
-                        },
-                    )
-                    .await?;
-                    print_reconstructed(&rebuilt, network, Some(&lookup_config))?;
-                    print_start_result(&out_config, &result);
+                    let found = require_found(network, workflow::lookup(&client, &vault).await?)?;
+                    let rebuilt = reconstruct(&found, &recovery_mnemonic, clawback_secs)?;
+                    rebuilt.config.save(&lookup_config)?;
+                    print_reconstructed(&rebuilt, network, Some(&lookup_config));
+                    (client, network, rebuilt.config)
                 }
                 (None, Some(path)) => {
                     let network = Network::from(network);
                     let client = ChainClient::new(network, &backend.into_backend()?);
-                    let config = VaultConfig::load(&path)?;
-                    let result = workflow::start(
-                        &client,
-                        StartWorkflow {
-                            config: &config,
-                            recovery_mnemonic: &recovery_mnemonic,
-                            new_custody_mnemonic: &new_custody_mnemonic,
-                            new_recovery_mnemonic: new_recovery_mnemonic.as_deref(),
-                            new_clawback_timelock: new_clawback_secs,
-                            new_word_count: word_count,
-                            network,
-                            out_config: &out_config,
-                        },
-                    )
-                    .await?;
-                    print_start_result(&out_config, &result);
+                    (client, network, VaultConfig::load(&path)?)
                 }
                 (None, None) => {
                     bail!("pass --vault <xch1…> (recommended) or --config <vault-config.json>")
                 }
             };
+            let result = workflow::start(
+                &client,
+                StartWorkflow {
+                    config: &config,
+                    recovery_mnemonic: &recovery_mnemonic,
+                    new_custody_mnemonic: &new_custody_mnemonic,
+                    new_recovery_mnemonic: new_recovery_mnemonic.as_deref(),
+                    new_clawback_timelock: new_clawback_secs,
+                    new_word_count: word_count,
+                    network,
+                    out_config: &out_config,
+                },
+            )
+            .await?;
+            print_start_result(&out_config, &result);
         }
         Commands::Finish {
             config,
@@ -314,15 +293,33 @@ fn client_for(
         .context("invalid --vault (expected xch1…/txch1… Receive address or 0x launcher id)")
 }
 
-fn print_found(found: &FoundVault, network: Network) {
+fn require_found(network: Network, report: LookupReport) -> Result<FoundVault> {
+    match report {
+        LookupReport::Found(found) => Ok(found),
+        LookupReport::NeedFallback(gap) => {
+            print_fallback(network, &gap);
+            bail!("cannot start recovery until lookup finds a custody spend");
+        }
+    }
+}
+
+fn print_lookup_header(network: Network, found: &FoundVault) {
     println!("network: {}", network.as_str());
     println!("launcher_id: 0x{}", hex::encode(found.launcher_id));
     println!("resolved_from: {}", found.launcher_source);
+}
+
+fn print_custody_members(found: &FoundVault) {
     if found.custody.members_complete() {
         println!("custody members: parsed from spend");
     } else {
         println!("custody members: hash only (M-of-N or unparsed); enough for delayed recovery");
     }
+}
+
+fn print_found(found: &FoundVault, network: Network) {
+    print_lookup_header(network, found);
+    print_custody_members(found);
 }
 
 fn print_start_result(out_config: &std::path::Path, result: &StartRecoveryResult) {
@@ -347,16 +344,11 @@ fn print_reconstructed(
     rebuilt: &ReconstructedVault,
     network: Network,
     out_config: Option<&std::path::Path>,
-) -> Result<()> {
-    println!("network: {}", network.as_str());
+) {
+    print_lookup_header(network, &rebuilt.found);
     if let Some(path) = out_config {
         println!("wrote vault config: {}", path.display());
     }
-    println!(
-        "launcher_id: 0x{}",
-        hex::encode(rebuilt.config.launcher_id_bytes()?)
-    );
-    println!("resolved_from: {}", rebuilt.found.launcher_source);
     println!(
         "custody_hash: 0x{}",
         hex::encode(rebuilt.found.custody.custody_hash)
@@ -369,13 +361,8 @@ fn print_reconstructed(
         "current_coin: 0x{}",
         hex::encode(rebuilt.found.current_coin.coin_id())
     );
-    if rebuilt.found.custody.members_complete() {
-        println!("custody members: parsed from spend");
-    } else {
-        println!("custody members: hash only (M-of-N or unparsed); enough for delayed recovery");
-    }
+    print_custody_members(&rebuilt.found);
     println!("{}", reconstruct_success_guidance(rebuilt.matches_current));
-    Ok(())
 }
 
 fn print_fallback(network: Network, gap: &chia_vault_recover::LookupGap) {

@@ -5,13 +5,13 @@ use std::sync::OnceLock;
 
 use chia_vault_recover::chain::ChainClient;
 use chia_vault_recover::config::VaultConfig;
-use chia_vault_recover::discover::FoundVault;
+use chia_vault_recover::discover::{FoundVault, reconstruct};
 use chia_vault_recover::guidance::{CLAWBACK_SECS_HELP, LOOKUP_CAN_RECOVER, fallback_guidance};
 use chia_vault_recover::keys::MnemonicWordCount;
 use chia_vault_recover::locate::client_for_vault;
 use chia_vault_recover::network::{Backend, Network};
 use chia_vault_recover::recovery::VaultPhase;
-use chia_vault_recover::workflow::{self, LookupReport, StartFromFound, StartWorkflow};
+use chia_vault_recover::workflow::{self, LookupReport, StartWorkflow};
 use eframe::egui;
 
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -47,10 +47,14 @@ const AFTER_START_GUIDANCE: &str =
 
 enum AppStep {
     NeedLookup,
-    Found { found: FoundVault },
+    Found {
+        found: FoundVault,
+    },
     NeedFallback(chia_vault_recover::LookupGap),
-    ReadyFromLookup { found: FoundVault, next: String },
-    ReadyFromFile { next: String },
+    /// Public layout is on disk (`config_path`): loaded JSON or written at Start.
+    Ready {
+        next: String,
+    },
 }
 
 struct App {
@@ -122,17 +126,11 @@ impl App {
     }
 
     fn can_start(&self) -> bool {
-        matches!(
-            self.step,
-            AppStep::Found { .. } | AppStep::ReadyFromLookup { .. } | AppStep::ReadyFromFile { .. }
-        )
+        matches!(self.step, AppStep::Found { .. } | AppStep::Ready { .. })
     }
 
     fn can_inspect(&self) -> bool {
-        matches!(
-            self.step,
-            AppStep::ReadyFromLookup { .. } | AppStep::ReadyFromFile { .. }
-        )
+        matches!(self.step, AppStep::Ready { .. })
     }
 
     fn guidance(&self) -> String {
@@ -140,23 +138,13 @@ impl App {
             AppStep::NeedLookup => INTRO_GUIDANCE.to_string(),
             AppStep::Found { .. } => LOOKUP_CAN_RECOVER.to_string(),
             AppStep::NeedFallback(gap) => fallback_guidance(gap),
-            AppStep::ReadyFromLookup { next, .. } | AppStep::ReadyFromFile { next } => next.clone(),
+            AppStep::Ready { next } => next.clone(),
         }
     }
 
     fn set_ready_next(&mut self, next: String) {
-        match &mut self.step {
-            AppStep::ReadyFromLookup { next: slot, .. } | AppStep::ReadyFromFile { next: slot } => {
-                *slot = next;
-            }
-            _ => {}
-        }
-    }
-
-    fn cached_found(&self) -> Option<&FoundVault> {
-        match &self.step {
-            AppStep::Found { found, .. } | AppStep::ReadyFromLookup { found, .. } => Some(found),
-            _ => None,
+        if let AppStep::Ready { next: slot } = &mut self.step {
+            *slot = next;
         }
     }
 }
@@ -197,7 +185,7 @@ impl eframe::App for App {
                             && let Some(path) = rfd::FileDialog::new().pick_file()
                         {
                             self.config_path = path.display().to_string();
-                            self.step = AppStep::ReadyFromFile {
+                            self.step = AppStep::Ready {
                                 next: LOADED_CONFIG_GUIDANCE.to_string(),
                             };
                         }
@@ -355,7 +343,7 @@ impl App {
     fn load_existing_config(&mut self) {
         let result = (|| {
             let config = VaultConfig::load(&self.config_path)?;
-            self.step = AppStep::ReadyFromFile {
+            self.step = AppStep::Ready {
                 next: LOADED_CONFIG_GUIDANCE.to_string(),
             };
             self.status = format!(
@@ -426,44 +414,42 @@ impl App {
                     Some(trimmed)
                 }
             };
+            let recovery_mnemonic = self.recovery_mnemonic.trim();
+            let new_custody_mnemonic = self.new_custody_mnemonic.trim();
+            let clawback_secs = self.clawback()?;
             let (client, network) = self.chain_client()?;
-            let start = if let Some(found) = self.cached_found().cloned() {
-                let (rebuilt, start) = runtime().block_on(workflow::start_from_found(
-                    &client,
-                    StartFromFound {
-                        found: &found,
-                        recovery_mnemonic: self.recovery_mnemonic.trim(),
-                        new_custody_mnemonic: self.new_custody_mnemonic.trim(),
-                        new_recovery_mnemonic: new_recovery,
-                        clawback_secs: self.clawback()?,
-                        new_clawback_timelock: None,
-                        new_word_count: word_count,
-                        network,
-                        out_config: &out,
-                        lookup_config: &lookup_out,
-                    },
-                ))?;
-                self.config_path = lookup_out.display().to_string();
-                self.step = AppStep::ReadyFromLookup {
-                    found: rebuilt.found,
-                    next: AFTER_START_GUIDANCE.to_string(),
-                };
-                start
-            } else {
-                let config = VaultConfig::load(&self.config_path)?;
+            let push_start = |config: &VaultConfig| {
                 runtime().block_on(workflow::start(
                     &client,
                     StartWorkflow {
-                        config: &config,
-                        recovery_mnemonic: self.recovery_mnemonic.trim(),
-                        new_custody_mnemonic: self.new_custody_mnemonic.trim(),
+                        config,
+                        recovery_mnemonic,
+                        new_custody_mnemonic,
                         new_recovery_mnemonic: new_recovery,
                         new_clawback_timelock: None,
                         new_word_count: word_count,
                         network,
                         out_config: &out,
                     },
-                ))?
+                ))
+            };
+            let found = match &self.step {
+                AppStep::Found { found } => Some(found.clone()),
+                AppStep::Ready { .. } => None,
+                _ => {
+                    return Err(chia_vault_recover::Error::msg(
+                        "look up the vault or load a vault-config before Start recovery",
+                    ));
+                }
+            };
+            let start = if let Some(found) = found {
+                let rebuilt = reconstruct(&found, recovery_mnemonic, clawback_secs)?;
+                rebuilt.config.save(&lookup_out)?;
+                self.config_path = lookup_out.display().to_string();
+                push_start(&rebuilt.config)?
+            } else {
+                let config = VaultConfig::load(&self.config_path)?;
+                push_start(&config)?
             };
             self.post_recovery_path = out.display().to_string();
             self.generated_recovery_mnemonic = start.generated_recovery_mnemonic.clone();
@@ -472,7 +458,9 @@ impl App {
                 start.clawback_timelock,
                 out.display()
             );
-            self.set_ready_next(AFTER_START_GUIDANCE.to_string());
+            self.step = AppStep::Ready {
+                next: AFTER_START_GUIDANCE.to_string(),
+            };
             Ok::<(), chia_vault_recover::Error>(())
         })();
         if let Err(e) = result {

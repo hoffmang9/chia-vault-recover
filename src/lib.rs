@@ -34,7 +34,6 @@ pub use recovery::{
 };
 pub use vault::{CustodyPath, VaultInternals, VaultKeys, VaultMemberKey};
 pub use workflow::{
-    LookupReport, StartFromFound, StartWorkflow, finish as finish_workflow,
-    inspect as inspect_workflow, lookup as lookup_workflow, start as start_workflow,
-    start_from_found,
+    LookupReport, StartWorkflow, finish as finish_workflow, inspect as inspect_workflow,
+    lookup as lookup_workflow, start as start_workflow,
 };
