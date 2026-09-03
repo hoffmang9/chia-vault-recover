@@ -74,15 +74,30 @@ pub const LOOKUP_READY_FOR_PHRASE: &str = "\
 Launcher and custody path are on chain. You do not need a vault-config-*.json download. \
 Enter the Cloud Wallet recovery phrase to rebuild the public layout and continue.";
 
+pub fn reconstruct_success_guidance(matches_current: bool) -> String {
+    let note = if matches_current {
+        "Reconstructed config matches the current unspent singleton (READY)."
+    } else {
+        "Reconstructed config matches a previous singleton state (vault may be in RECOVERY)."
+    };
+    format!("{LOOKUP_SUCCESS_NO_JSON} {note}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
     fn fallback_mentions_self_send_and_script() {
-        let text = fallback_guidance(LookupGap::LauncherNotFound);
-        assert!(text.contains("self-send"));
-        assert!(text.contains("download-vault-config.js"));
-        assert!(text.contains("vault.chia.net"));
+        for gap in [
+            LookupGap::LauncherNotFound,
+            LookupGap::SingletonNeverSpent,
+            LookupGap::NoCustodySpend,
+        ] {
+            let text = fallback_guidance(gap);
+            assert!(text.contains("self-send"), "{gap:?}");
+            assert!(text.contains("download-vault-config.js"), "{gap:?}");
+            assert!(text.contains("vault.chia.net"), "{gap:?}");
+        }
     }
 }

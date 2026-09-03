@@ -1,4 +1,4 @@
-//! Reconstruct vault custody from a previous on-chain spend (Sage fallback).
+//! Reconstruct vault custody from a previous on-chain spend.
 //!
 //! Cloud Wallet never hints the full vault config on-chain. A custody spend of the
 //! current 1-of-2 inner puzzle *does* reveal that path: the One-of-N member puzzle
@@ -7,16 +7,14 @@
 //! that matches the singleton.
 
 use chia_protocol::{Bytes32, Coin, CoinSpend};
-use chia_puzzle_types::singleton::SingletonSolution;
 use chia_puzzles::{FORCE_1_OF_2_W_RESTRICTED_VARIABLE_HASH, ONE_OF_N_HASH, RESTRICTIONS_HASH};
-use chia_sdk_driver::{Puzzle, SpendContext};
+use chia_sdk_driver::Puzzle;
 use chia_sdk_types::{
     Mod,
     puzzles::{
-        BlsMember, BlsMemberPuzzleAssert, DelegatedPuzzleFeederArgs, DelegatedPuzzleFeederSolution,
-        INDEX_WRAPPER_HASH, IndexWrapperArgs, K1Member, K1MemberPuzzleAssert, OneOfNArgs,
-        OneOfNSolution, PasskeyMember, PasskeyMemberPuzzleAssert, R1Member, R1MemberPuzzleAssert,
-        RestrictionsArgs, SingletonMember, SingletonMemberWithMode,
+        BlsMember, BlsMemberPuzzleAssert, K1Member, K1MemberPuzzleAssert, OneOfNSolution,
+        PasskeyMember, PasskeyMemberPuzzleAssert, R1Member, R1MemberPuzzleAssert, RestrictionsArgs,
+        SingletonMember, SingletonMemberWithMode,
     },
 };
 use clvm_traits::FromClvm;
@@ -28,7 +26,8 @@ use crate::config::{
 };
 use crate::error::{Error, Result};
 use crate::keys::{key_from_mnemonic, public_key_to_hex};
-use crate::vault::{RecoverySignerSet, SignerSet, VaultKeys, VaultMemberKey, get_vault_internals};
+use crate::mips::{alloc_spend, peel_index_wrapper, peel_vault_mips};
+use crate::vault::{CustodyPath, SignerSet, VaultMemberKey, get_vault_internals};
 
 /// Common Cloud Wallet / test timelocks, tried when the user does not pass one.
 pub const DEFAULT_TIMELOCK_CANDIDATES: &[u64] = &[
@@ -42,28 +41,36 @@ pub struct DiscoveredCustodyPath {
     pub vault_launcher_ids: Vec<Bytes32>,
 }
 
+impl DiscoveredCustodyPath {
+    pub fn members_complete(&self) -> bool {
+        !self.members.is_empty() || !self.vault_launcher_ids.is_empty()
+    }
+}
+
+/// Chain facts from a successful lookup. No mnemonic, no rebuilt config.
 #[derive(Debug, Clone)]
-pub struct DiscoverReport {
+pub struct FoundVault {
+    pub launcher_id: Bytes32,
+    pub launcher_source: String,
+    pub custody: DiscoveredCustodyPath,
+    pub current_coin: Coin,
+    pub ancestor_puzzle_hashes: Vec<Bytes32>,
+}
+
+#[derive(Debug, Clone)]
+pub struct ReconstructedVault {
     pub config: VaultConfig,
     pub custody_hash: TreeHash,
     pub clawback_timelock: u64,
     pub current_coin: Coin,
     pub members_complete: bool,
-    pub guidance: String,
-    /// How the launcher id was obtained (`launcher id 0x…` or `address xch1…`).
     pub launcher_source: String,
+    pub matches_current: bool,
 }
 
 /// Extract the custody path from a vault singleton spend, if this spend used custody.
 pub fn custody_from_vault_spend(spend: &CoinSpend) -> Result<Option<DiscoveredCustodyPath>> {
-    let mut ctx = SpendContext::new();
-    let puzzle_ptr = ctx
-        .alloc(&spend.puzzle_reveal)
-        .map_err(|e| Error::msg(format!("alloc puzzle: {e}")))?;
-    let solution_ptr = ctx
-        .alloc(&spend.solution)
-        .map_err(|e| Error::msg(format!("alloc solution: {e}")))?;
-    let puzzle = Puzzle::parse(&ctx, puzzle_ptr);
+    let (ctx, puzzle, solution_ptr) = alloc_spend(spend)?;
     custody_from_parsed_spend(&ctx, puzzle, solution_ptr)
 }
 
@@ -72,36 +79,16 @@ fn custody_from_parsed_spend(
     puzzle: Puzzle,
     solution: NodePtr,
 ) -> Result<Option<DiscoveredCustodyPath>> {
-    let Some(curried) = puzzle.as_curried() else {
+    let Some((one_puzzle, one_solution)) = peel_vault_mips(alloc, puzzle, solution)? else {
         return Ok(None);
     };
-    // Singleton top layer.
-    let inner_puzzle = {
-        use chia_puzzle_types::singleton::SingletonArgs;
-        use chia_puzzles::SINGLETON_TOP_LAYER_V1_1_HASH;
-        if curried.mod_hash != SINGLETON_TOP_LAYER_V1_1_HASH.into() {
-            return Ok(None);
-        }
-        let args = SingletonArgs::<Puzzle>::from_clvm(alloc, curried.args)
-            .map_err(|e| Error::msg(format!("parse singleton args: {e}")))?;
-        args.inner_puzzle
-    };
-    let singleton_sol = SingletonSolution::<NodePtr>::from_clvm(alloc, solution)
-        .map_err(|e| Error::msg(format!("parse singleton solution: {e}")))?;
-
-    let (after_index, index_sol) =
-        unwrap_index_wrapper(alloc, inner_puzzle, singleton_sol.inner_solution)?;
-    let (after_feeder, feeder_sol) = unwrap_delegated_feeder(alloc, after_index, index_sol)?;
-
-    let Some(one_of_n) = after_feeder.as_curried() else {
+    let Some(one_of_n) = one_puzzle.as_curried() else {
         return Ok(None);
     };
     if one_of_n.mod_hash != ONE_OF_N_HASH.into() {
         return Ok(None);
     }
-    let _args = OneOfNArgs::from_clvm(alloc, one_of_n.args)
-        .map_err(|e| Error::msg(format!("parse one-of-n args: {e}")))?;
-    let one_sol = OneOfNSolution::<NodePtr, NodePtr>::from_clvm(alloc, feeder_sol)
+    let one_sol = OneOfNSolution::<NodePtr, NodePtr>::from_clvm(alloc, one_solution)
         .map_err(|e| Error::msg(format!("parse one-of-n solution: {e}")))?;
 
     let member_puzzle = Puzzle::parse(alloc, one_sol.member_puzzle);
@@ -114,16 +101,13 @@ fn custody_from_parsed_spend(
         parse_member_keys(alloc, member_puzzle, one_sol.member_solution);
 
     if !members.is_empty() || !vault_launcher_ids.is_empty() {
-        let trial = SignerSet {
+        let computed = CustodyPath::Signers(SignerSet {
             keys: members.clone(),
             vault_launcher_ids: vault_launcher_ids.clone(),
             threshold: 1,
-            hash_override: None,
-        };
-        if let Ok(computed) = crate::vault::custody_hash_from_set(&trial)
-            && computed != custody_hash
-        {
-            // Incomplete M-of-N: keep the hash, drop partial members.
+        })
+        .hash()?;
+        if computed != custody_hash {
             members.clear();
             vault_launcher_ids.clear();
         }
@@ -143,30 +127,21 @@ pub fn reconstruct_config(
     recovery_mnemonic: &str,
     clawback_timelock: u64,
 ) -> Result<VaultConfig> {
-    let recovery = key_from_mnemonic(recovery_mnemonic)?;
-    let keys = VaultKeys {
-        custody: SignerSet {
+    if custody.members_complete() {
+        let computed = CustodyPath::Signers(SignerSet {
             keys: custody.members.clone(),
             vault_launcher_ids: custody.vault_launcher_ids.clone(),
             threshold: 1,
-            hash_override: Some(custody.custody_hash),
-        },
-        recovery: RecoverySignerSet {
-            set: SignerSet {
-                keys: vec![VaultMemberKey::Bls(recovery.public_key)],
-                vault_launcher_ids: vec![],
-                threshold: 1,
-                hash_override: None,
-            },
-            clawback_timelock,
-        },
-    };
-    let internals = get_vault_internals(launcher_id, &keys)?;
-    if internals.custody_hash != custody.custody_hash {
-        return Err(Error::msg(
-            "reconstructed custody hash does not match spend",
-        ));
+        })
+        .hash()?;
+        if computed != custody.custody_hash {
+            return Err(Error::msg(
+                "parsed custody members do not hash to the spent custody path",
+            ));
+        }
     }
+
+    let recovery = key_from_mnemonic(recovery_mnemonic)?;
 
     Ok(VaultConfig {
         launcher_id: format!("0x{}", hex::encode(launcher_id)),
@@ -187,6 +162,49 @@ pub fn reconstruct_config(
     })
 }
 
+pub fn reconstruct(
+    found: &FoundVault,
+    recovery_mnemonic: &str,
+    clawback_timelock: Option<u64>,
+) -> Result<ReconstructedVault> {
+    let candidates: Vec<u64> = if let Some(secs) = clawback_timelock {
+        vec![secs]
+    } else {
+        DEFAULT_TIMELOCK_CANDIDATES.to_vec()
+    };
+
+    for &timelock in &candidates {
+        let config = reconstruct_config(
+            found.launcher_id,
+            &found.custody,
+            recovery_mnemonic,
+            timelock,
+        )?;
+        let ready_match = config_matches_puzzle_hash(&config, found.current_coin.puzzle_hash)?;
+        let ancestor_match = found
+            .ancestor_puzzle_hashes
+            .iter()
+            .any(|ph| config_matches_puzzle_hash(&config, *ph).unwrap_or(false));
+        if ready_match || ancestor_match {
+            return Ok(ReconstructedVault {
+                config,
+                custody_hash: found.custody.custody_hash,
+                clawback_timelock: timelock,
+                current_coin: found.current_coin,
+                members_complete: found.custody.members_complete(),
+                launcher_source: found.launcher_source.clone(),
+                matches_current: ready_match,
+            });
+        }
+    }
+
+    Err(Error::msg(format!(
+        "found custody hash 0x{} but no candidate timelock produced a matching vault puzzle hash. \
+         Pass --clawback-secs explicitly (Cloud Wallet default is 43200)",
+        hex::encode(found.custody.custody_hash)
+    )))
+}
+
 pub fn config_matches_puzzle_hash(config: &VaultConfig, puzzle_hash: Bytes32) -> Result<bool> {
     let internals = get_vault_internals(config.launcher_id_bytes()?, &config.to_vault_keys()?)?;
     Ok(internals.full_puzzle_hash == puzzle_hash)
@@ -202,7 +220,7 @@ fn members_to_config(
             VaultMemberKey::Bls(pk) => VaultConfigMember::PublicKey {
                 public_key: public_key_to_hex(pk),
                 curve: Curve::Bls12_381,
-                key_type: Some(KeyType::RecoveryPhrase),
+                key_type: None,
             },
             VaultMemberKey::K1(pk) => VaultConfigMember::PublicKey {
                 public_key: format!("0x{}", hex::encode(pk.to_bytes())),
@@ -229,45 +247,8 @@ fn members_to_config(
     out
 }
 
-fn unwrap_index_wrapper(
-    alloc: &Allocator,
-    puzzle: Puzzle,
-    solution: NodePtr,
-) -> Result<(Puzzle, NodePtr)> {
-    let Some(curried) = puzzle.as_curried() else {
-        return Ok((puzzle, solution));
-    };
-    if curried.mod_hash != INDEX_WRAPPER_HASH {
-        return Ok((puzzle, solution));
-    }
-    let args = IndexWrapperArgs::<usize, Puzzle>::from_clvm(alloc, curried.args)
-        .map_err(|e| Error::msg(format!("parse index wrapper: {e}")))?;
-    Ok((args.inner_puzzle, solution))
-}
-
-fn unwrap_delegated_feeder(
-    alloc: &Allocator,
-    puzzle: Puzzle,
-    solution: NodePtr,
-) -> Result<(Puzzle, NodePtr)> {
-    let Some(curried) = puzzle.as_curried() else {
-        return Ok((puzzle, solution));
-    };
-    if curried.mod_hash != chia_puzzles::DELEGATED_PUZZLE_FEEDER_HASH.into() {
-        return Ok((puzzle, solution));
-    }
-    let args = DelegatedPuzzleFeederArgs::<Puzzle>::from_clvm(alloc, curried.args)
-        .map_err(|e| Error::msg(format!("parse delegated puzzle feeder: {e}")))?;
-    let feeder =
-        DelegatedPuzzleFeederSolution::<NodePtr, NodePtr, NodePtr>::from_clvm(alloc, solution)
-            .map_err(|e| Error::msg(format!("parse delegated puzzle feeder solution: {e}")))?;
-    Ok((args.inner_puzzle, feeder.inner_solution))
-}
-
 fn member_looks_like_recovery(alloc: &Allocator, puzzle: Puzzle) -> bool {
-    let Ok((inner, _)) = unwrap_index_wrapper(alloc, puzzle, NodePtr::NIL) else {
-        return false;
-    };
+    let inner = peel_index_wrapper(alloc, puzzle);
     let Some(curried) = inner.as_curried() else {
         return false;
     };
@@ -303,9 +284,7 @@ fn collect_member_keys(
     keys: &mut Vec<VaultMemberKey>,
     vaults: &mut Vec<Bytes32>,
 ) {
-    let Ok((inner, inner_sol)) = unwrap_index_wrapper(alloc, puzzle, solution) else {
-        return;
-    };
+    let inner = peel_index_wrapper(alloc, puzzle);
     let Some(curried) = inner.as_curried() else {
         return;
     };
@@ -314,13 +293,13 @@ fn collect_member_keys(
         if let Ok(args) =
             RestrictionsArgs::<Vec<Puzzle>, Vec<Puzzle>, Puzzle>::from_clvm(alloc, curried.args)
         {
-            collect_member_keys(alloc, args.inner_puzzle, inner_sol, keys, vaults);
+            collect_member_keys(alloc, args.inner_puzzle, solution, keys, vaults);
         }
         return;
     }
 
     if curried.mod_hash == ONE_OF_N_HASH.into()
-        && let Ok(one_sol) = OneOfNSolution::<NodePtr, NodePtr>::from_clvm(alloc, inner_sol)
+        && let Ok(one_sol) = OneOfNSolution::<NodePtr, NodePtr>::from_clvm(alloc, solution)
     {
         collect_member_keys(
             alloc,
@@ -399,53 +378,13 @@ fn parse_leaf_member(alloc: &Allocator, puzzle: Puzzle) -> Option<Leaf> {
     {
         return Some(Leaf::Vault(m.singleton_struct.launcher_id));
     }
-    parse_leaf_from_args(alloc, curried.mod_hash, args)
-}
-
-fn parse_leaf_from_args(alloc: &Allocator, mod_hash: TreeHash, args: NodePtr) -> Option<Leaf> {
-    use chia_bls::PublicKey;
-    use chia_secp::{K1PublicKey, R1PublicKey};
-
-    // Curry args are `(c (q . ARG) rest)`. Unquote the first argument.
-    let first = match <(NodePtr, NodePtr)>::from_clvm(alloc, args) {
-        Ok((quoted, _)) => match <(NodePtr, NodePtr)>::from_clvm(alloc, quoted) {
-            Ok((_, value)) => value,
-            Err(_) => quoted,
-        },
-        Err(_) => args,
-    };
-
-    if (mod_hash == BlsMember::mod_hash() || mod_hash == BlsMemberPuzzleAssert::mod_hash())
-        && let Ok(pk) =
-            PublicKey::from_clvm(alloc, first).or_else(|_| PublicKey::from_clvm(alloc, args))
-    {
-        return Some(Leaf::Key(VaultMemberKey::Bls(pk)));
-    }
-    if (mod_hash == K1Member::mod_hash() || mod_hash == K1MemberPuzzleAssert::mod_hash())
-        && let Ok(pk) =
-            K1PublicKey::from_clvm(alloc, first).or_else(|_| K1PublicKey::from_clvm(alloc, args))
-    {
-        return Some(Leaf::Key(VaultMemberKey::K1(pk)));
-    }
-    if (mod_hash == R1Member::mod_hash() || mod_hash == R1MemberPuzzleAssert::mod_hash())
-        && let Ok(pk) =
-            R1PublicKey::from_clvm(alloc, first).or_else(|_| R1PublicKey::from_clvm(alloc, args))
-    {
-        return Some(Leaf::Key(VaultMemberKey::R1(pk)));
-    }
-    if (mod_hash == PasskeyMember::mod_hash() || mod_hash == PasskeyMemberPuzzleAssert::mod_hash())
-        && let Ok(pk) =
-            R1PublicKey::from_clvm(alloc, first).or_else(|_| R1PublicKey::from_clvm(alloc, args))
-    {
-        return Some(Leaf::Key(VaultMemberKey::Passkey(pk)));
-    }
     None
 }
 
 #[cfg(test)]
 mod tests {
     use chia_sdk_driver::SpendContext;
-    use chia_sdk_types::puzzles::BlsMember;
+    use chia_sdk_types::puzzles::{BlsMember, IndexWrapperArgs};
 
     use crate::keys::{MnemonicWordCount, generate_mnemonic};
 
@@ -481,5 +420,42 @@ mod tests {
             "keys={keys:?}"
         );
         keys.clear();
+    }
+
+    #[test]
+    fn reconstructed_bls_custody_is_not_labeled_recovery_phrase() {
+        let custody = generate_mnemonic(MnemonicWordCount::Words12).unwrap();
+        let labeled = members_to_config(&[VaultMemberKey::Bls(custody.key_pair.public_key)], &[]);
+        assert!(matches!(
+            labeled.first(),
+            Some(VaultConfigMember::PublicKey {
+                key_type: None,
+                curve: Curve::Bls12_381,
+                ..
+            })
+        ));
+    }
+
+    #[test]
+    fn hash_only_config_uses_custody_path_hash() {
+        let recovery = generate_mnemonic(MnemonicWordCount::Words12).unwrap();
+        let hash_only = DiscoveredCustodyPath {
+            custody_hash: TreeHash::from(Bytes32::new([0x11; 32])),
+            members: vec![],
+            vault_launcher_ids: vec![],
+        };
+        let config = reconstruct_config(
+            Bytes32::new([0x22; 32]),
+            &hash_only,
+            &recovery.words,
+            43_200,
+        )
+        .unwrap();
+        assert!(config.custody.members.is_empty());
+        assert!(config.custody.hash.is_some());
+        assert!(matches!(
+            config.to_vault_keys().unwrap().custody,
+            CustodyPath::Hash(_)
+        ));
     }
 }

@@ -3,10 +3,7 @@
 use chia_protocol::{Bytes32, CoinSpend};
 use chia_puzzles::SINGLETON_LAUNCHER_HASH;
 use chia_sdk_coinset::CoinRecord;
-use chia_sdk_driver::{
-    CatLayer, DelegatedPuzzleFeederLayer, IndexWrapperLayer, Layer, P2SingletonLayer, Puzzle,
-    SingletonLayer, SingletonMemberLayer, SpendContext,
-};
+use chia_sdk_driver::{CatLayer, Layer, P2SingletonLayer, Puzzle, SingletonLayer};
 use chia_sdk_types::puzzles::OneOfNSolution;
 use clvm_traits::FromClvm;
 use clvmr::NodePtr;
@@ -15,9 +12,8 @@ use crate::address::{decode_address, network_from_address_prefix};
 use crate::chain::ChainClient;
 use crate::config::parse_bytes32;
 use crate::error::{Error, Result};
-use crate::network::Network;
-
-type CloudWalletP2 = IndexWrapperLayer<usize, DelegatedPuzzleFeederLayer<SingletonMemberLayer>>;
+use crate::mips::{CloudWalletP2, alloc_spend};
+use crate::network::{Backend, Network};
 
 #[derive(Debug, Clone)]
 pub struct ResolvedLauncher {
@@ -59,6 +55,16 @@ impl VaultLocator {
             Self::Address { hrp, .. } => network_from_address_prefix(hrp),
         }
     }
+}
+
+pub fn client_for_vault(
+    vault: &str,
+    fallback_network: Network,
+    backend: &Backend,
+) -> Result<(ChainClient, Network)> {
+    let locator = parse_vault_locator(vault)?;
+    let network = locator.inferred_network().unwrap_or(fallback_network);
+    Ok((ChainClient::new(network, backend), network))
 }
 
 pub async fn resolve_launcher_id(
@@ -174,10 +180,7 @@ async fn walk_parents_to_launcher(
 
 /// Pull a launcher id out of a revealed puzzle (p2-singleton, Cloud Wallet p2, or vault singleton).
 pub fn launcher_from_spend(spend: &CoinSpend) -> Option<Bytes32> {
-    let mut ctx = SpendContext::new();
-    let puzzle_ptr = ctx.alloc(&spend.puzzle_reveal).ok()?;
-    let solution_ptr = ctx.alloc(&spend.solution).ok()?;
-    let puzzle = Puzzle::parse(&ctx, puzzle_ptr);
+    let (ctx, puzzle, solution_ptr) = alloc_spend(spend).ok()?;
     launcher_from_puzzle(&ctx, puzzle, solution_ptr)
 }
 

@@ -1,9 +1,15 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use chia_protocol::Bytes32;
 use chia_vault_recover::chain::ChainClient;
 use chia_vault_recover::config::VaultConfig;
+use chia_vault_recover::discover::{FoundVault, ReconstructedVault, reconstruct};
+use chia_vault_recover::guidance::{
+    LOOKUP_READY_FOR_PHRASE, fallback_guidance, reconstruct_success_guidance,
+};
 use chia_vault_recover::keys::MnemonicWordCount;
+use chia_vault_recover::locate::client_for_vault;
 use chia_vault_recover::network::{Backend, Network};
 use chia_vault_recover::recovery::VaultPhase;
 use chia_vault_recover::workflow::{self, LookupReport, StartWorkflow};
@@ -156,13 +162,32 @@ async fn main() -> Result<()> {
             backend,
             out_config,
         } => {
-            let (client, network) = client_for_vault(&vault, network, backend)?;
-            let mnemonic = optional_mnemonic(recovery_mnemonic, recovery_mnemonic_file)?;
-            let report =
-                workflow::lookup(&client, &vault, mnemonic.as_deref(), clawback_secs).await?;
-            print_lookup(&report, network, Some(&out_config))?;
-            if matches!(report, LookupReport::NeedFallback { .. }) {
-                std::process::exit(2);
+            let (client, network) = client_for(&vault, network, backend)?;
+            let report = workflow::lookup(&client, &vault).await?;
+            match report {
+                LookupReport::Found(found) => {
+                    if let Some(mnemonic) =
+                        optional_mnemonic(recovery_mnemonic, recovery_mnemonic_file)?
+                    {
+                        let rebuilt = reconstruct(&found, &mnemonic, clawback_secs)?;
+                        rebuilt.config.save(&out_config)?;
+                        print_reconstructed(&rebuilt, network, Some(&out_config))?;
+                    } else {
+                        print_found(&found, network);
+                        println!("{LOOKUP_READY_FOR_PHRASE}");
+                        println!(
+                            "Re-run lookup with --recovery-mnemonic-file (or CHIA_VAULT_RECOVERY_MNEMONIC)."
+                        );
+                    }
+                }
+                LookupReport::NeedFallback {
+                    gap,
+                    launcher_id,
+                    launcher_source,
+                } => {
+                    print_fallback(network, launcher_id, launcher_source.as_deref(), gap);
+                    std::process::exit(2);
+                }
             }
         }
         Commands::Start {
@@ -185,16 +210,27 @@ async fn main() -> Result<()> {
             let recovery_mnemonic =
                 read_mnemonic(recovery_mnemonic, recovery_mnemonic_file, "recovery")?;
             let (client, network, config) = match (vault, config) {
-                (Some(vault), _) => {
-                    let (client, network) = client_for_vault(&vault, network, backend)?;
-                    let report =
-                        workflow::lookup(&client, &vault, Some(&recovery_mnemonic), clawback_secs)
-                            .await?;
-                    print_lookup(&report, network, Some(&lookup_config))?;
-                    let LookupReport::Reconstructed(discovered) = report else {
-                        bail!("cannot start recovery until lookup rebuilds the vault layout");
+                (Some(_), Some(_)) => {
+                    bail!("pass --vault <xch1…> or --config <vault-config.json>, not both")
+                }
+                (Some(vault), None) => {
+                    let (client, network) = client_for(&vault, network, backend)?;
+                    let report = workflow::lookup(&client, &vault).await?;
+                    let found = match report {
+                        LookupReport::Found(found) => found,
+                        LookupReport::NeedFallback {
+                            gap,
+                            launcher_id,
+                            launcher_source,
+                        } => {
+                            print_fallback(network, launcher_id, launcher_source.as_deref(), gap);
+                            bail!("cannot start recovery until lookup finds a custody spend");
+                        }
                     };
-                    (client, network, discovered.config)
+                    let rebuilt = reconstruct(&found, &recovery_mnemonic, clawback_secs)?;
+                    rebuilt.config.save(&lookup_config)?;
+                    print_reconstructed(&rebuilt, network, Some(&lookup_config))?;
+                    (client, network, rebuilt.config)
                 }
                 (None, Some(path)) => {
                     let network = Network::from(network);
@@ -299,79 +335,64 @@ async fn main() -> Result<()> {
     Ok(())
 }
 
-fn client_for_vault(
+fn client_for(
     vault: &str,
     network: NetworkArg,
     backend: BackendArgs,
 ) -> Result<(ChainClient, Network)> {
-    let locator = chia_vault_recover::parse_vault_locator(vault)
-        .context("invalid --vault (expected xch1…/txch1… Receive address or 0x launcher id)")?;
-    let network = locator.inferred_network().unwrap_or(network.into());
-    Ok((ChainClient::new(network, &backend.into_backend()?), network))
+    client_for_vault(vault, network.into(), &backend.into_backend()?)
+        .context("invalid --vault (expected xch1…/txch1… Receive address or 0x launcher id)")
 }
 
-fn print_lookup(
-    report: &LookupReport,
+fn print_found(found: &FoundVault, network: Network) {
+    println!("network: {}", network.as_str());
+    println!("launcher_id: 0x{}", hex::encode(found.launcher_id));
+    println!("resolved_from: {}", found.launcher_source);
+}
+
+fn print_reconstructed(
+    rebuilt: &ReconstructedVault,
     network: Network,
     out_config: Option<&std::path::Path>,
 ) -> Result<()> {
     println!("network: {}", network.as_str());
-    match report {
-        LookupReport::Reconstructed(discovered) => {
-            if let Some(path) = out_config {
-                discovered.config.save(path)?;
-                println!("wrote vault config: {}", path.display());
-            }
-            println!(
-                "launcher_id: 0x{}",
-                hex::encode(discovered.config.launcher_id_bytes()?)
-            );
-            println!("resolved_from: {}", discovered.launcher_source);
-            println!("custody_hash: 0x{}", hex::encode(discovered.custody_hash));
-            println!("clawback_timelock_secs: {}", discovered.clawback_timelock);
-            println!(
-                "current_coin: 0x{}",
-                hex::encode(discovered.current_coin.coin_id())
-            );
-            if discovered.members_complete {
-                println!("custody members: parsed from spend");
-            } else {
-                println!(
-                    "custody members: hash only (M-of-N or unparsed); enough for delayed recovery"
-                );
-            }
-            println!("{}", discovered.guidance);
-        }
-        LookupReport::ReadyForPhrase {
-            launcher_id,
-            launcher_source,
-            guidance,
-        } => {
-            println!("launcher_id: 0x{}", hex::encode(launcher_id));
-            println!("resolved_from: {launcher_source}");
-            println!("{guidance}");
-            println!(
-                "Re-run lookup with --recovery-mnemonic-file (or CHIA_VAULT_RECOVERY_MNEMONIC)."
-            );
-        }
-        LookupReport::NeedFallback {
-            launcher_id,
-            launcher_source,
-            reason,
-            guidance,
-        } => {
-            if let Some(id) = launcher_id {
-                println!("launcher_id: 0x{}", hex::encode(id));
-            }
-            if let Some(source) = launcher_source {
-                println!("resolved_from: {source}");
-            }
-            println!("{reason}");
-            println!();
-            println!("{guidance}");
-        }
+    if let Some(path) = out_config {
+        println!("wrote vault config: {}", path.display());
     }
+    println!(
+        "launcher_id: 0x{}",
+        hex::encode(rebuilt.config.launcher_id_bytes()?)
+    );
+    println!("resolved_from: {}", rebuilt.launcher_source);
+    println!("custody_hash: 0x{}", hex::encode(rebuilt.custody_hash));
+    println!("clawback_timelock_secs: {}", rebuilt.clawback_timelock);
+    println!(
+        "current_coin: 0x{}",
+        hex::encode(rebuilt.current_coin.coin_id())
+    );
+    if rebuilt.members_complete {
+        println!("custody members: parsed from spend");
+    } else {
+        println!("custody members: hash only (M-of-N or unparsed); enough for delayed recovery");
+    }
+    println!("{}", reconstruct_success_guidance(rebuilt.matches_current));
     Ok(())
+}
+
+fn print_fallback(
+    network: Network,
+    launcher_id: Option<Bytes32>,
+    launcher_source: Option<&str>,
+    gap: chia_vault_recover::LookupGap,
+) {
+    println!("network: {}", network.as_str());
+    if let Some(id) = launcher_id {
+        println!("launcher_id: 0x{}", hex::encode(id));
+    }
+    if let Some(source) = launcher_source {
+        println!("resolved_from: {source}");
+    }
+    println!("{}", fallback_guidance(gap));
 }
 
 fn optional_mnemonic(inline: Option<String>, file: Option<PathBuf>) -> Result<Option<String>> {

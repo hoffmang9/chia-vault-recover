@@ -32,9 +32,22 @@ pub struct SignerSet {
     pub keys: Vec<VaultMemberKey>,
     pub vault_launcher_ids: Vec<Bytes32>,
     pub threshold: usize,
-    /// When set (e.g. discovered from a previous spend), used instead of hashing members.
-    /// Members may be incomplete for M-of-N custody; the hash is the source of truth.
-    pub hash_override: Option<TreeHash>,
+}
+
+/// Custody as either a full signer set or a hash-only path from a previous spend.
+#[derive(Debug, Clone)]
+pub enum CustodyPath {
+    Signers(SignerSet),
+    Hash(TreeHash),
+}
+
+impl CustodyPath {
+    pub fn hash(&self) -> Result<TreeHash> {
+        match self {
+            Self::Hash(hash) => Ok(*hash),
+            Self::Signers(set) => custody_member_hash(set),
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -45,7 +58,7 @@ pub struct RecoverySignerSet {
 
 #[derive(Debug, Clone)]
 pub struct VaultKeys {
-    pub custody: SignerSet,
+    pub custody: CustodyPath,
     pub recovery: RecoverySignerSet,
 }
 
@@ -68,7 +81,7 @@ pub struct RecoveryStateHashes {
 }
 
 pub fn get_vault_internals(launcher_id: Bytes32, keys: &VaultKeys) -> Result<VaultInternals> {
-    let custody_hash = custody_member_hash(&keys.custody)?;
+    let custody_hash = keys.custody.hash()?;
     let (recovery_hash, recovery_restrictions) = ready_recovery_hash(custody_hash, &keys.recovery)?;
 
     let inner_puzzle_hash = top_level_hash(custody_hash, recovery_hash);
@@ -108,7 +121,7 @@ fn recovery_state_from_finish_hash(
     keys: &VaultKeys,
     finish_delegated_puzzle_hash: TreeHash,
 ) -> Result<RecoveryStateHashes> {
-    let custody_hash = custody_member_hash(&keys.custody)?;
+    let custody_hash = keys.custody.hash()?;
     let timelock = keys.recovery.clawback_timelock;
     let timelock_restriction = Restriction {
         kind: RestrictionKind::MemberCondition,
@@ -244,14 +257,7 @@ pub fn insert_recovery_restriction_spends(
     Ok(())
 }
 
-pub(crate) fn custody_hash_from_set(custody: &SignerSet) -> Result<TreeHash> {
-    custody_member_hash(custody)
-}
-
 fn custody_member_hash(custody: &SignerSet) -> Result<TreeHash> {
-    if let Some(hash) = custody.hash_override {
-        return Ok(hash);
-    }
     let mut hashes = member_hashes(custody, true)?;
     sort_hashes(&mut hashes);
     if hashes.len() == 1 && custody.threshold == 1 {

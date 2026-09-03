@@ -5,7 +5,12 @@ use std::sync::OnceLock;
 
 use chia_vault_recover::chain::ChainClient;
 use chia_vault_recover::config::VaultConfig;
+use chia_vault_recover::discover::{FoundVault, reconstruct};
+use chia_vault_recover::guidance::{
+    LOOKUP_READY_FOR_PHRASE, fallback_guidance, reconstruct_success_guidance,
+};
 use chia_vault_recover::keys::MnemonicWordCount;
+use chia_vault_recover::locate::client_for_vault;
 use chia_vault_recover::network::{Backend, Network};
 use chia_vault_recover::recovery::VaultPhase;
 use chia_vault_recover::workflow::{self, LookupReport, StartWorkflow};
@@ -35,8 +40,16 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+enum AppStep {
+    NeedLookup,
+    FoundNeedsPhrase,
+    NeedFallback,
+    Ready,
+}
+
 struct App {
     vault_address: String,
+    last_lookup_vault: String,
     config_path: String,
     post_recovery_path: String,
     clawback_secs: String,
@@ -49,13 +62,15 @@ struct App {
     status: String,
     generated_recovery_mnemonic: Option<String>,
     last_guidance: String,
-    layout_ready: bool,
+    step: AppStep,
+    found: Option<FoundVault>,
 }
 
 impl Default for App {
     fn default() -> Self {
         Self {
             vault_address: String::new(),
+            last_lookup_vault: String::new(),
             config_path: String::new(),
             post_recovery_path: String::new(),
             clawback_secs: String::new(),
@@ -70,7 +85,8 @@ impl Default for App {
             last_guidance: String::from(
                 "Enter the vault Receive address (xch1… / txch1…) from Cloud Wallet, then click Look up vault.",
             ),
-            layout_ready: false,
+            step: AppStep::NeedLookup,
+            found: None,
         }
     }
 }
@@ -95,13 +111,20 @@ impl App {
         }
     }
 
-    fn client_for_vault(
-        &self,
-        vault: &str,
-    ) -> chia_vault_recover::error::Result<(ChainClient, Network)> {
-        let locator = chia_vault_recover::parse_vault_locator(vault)?;
-        let network = locator.inferred_network().unwrap_or(self.network());
-        Ok((ChainClient::new(network, &self.backend()), network))
+    fn chain_client(&self) -> chia_vault_recover::error::Result<(ChainClient, Network)> {
+        let vault = self.vault_address.trim();
+        if vault.is_empty() {
+            Ok((
+                ChainClient::new(self.network(), &self.backend()),
+                self.network(),
+            ))
+        } else {
+            client_for_vault(vault, self.network(), &self.backend())
+        }
+    }
+
+    fn layout_ready(&self) -> bool {
+        matches!(self.step, AppStep::Ready)
     }
 }
 
@@ -157,7 +180,7 @@ impl eframe::App for App {
                             && let Some(path) = rfd::FileDialog::new().pick_file()
                         {
                             self.config_path = path.display().to_string();
-                            self.layout_ready = true;
+                            self.step = AppStep::Ready;
                         }
                     });
                     if ui.button("Load config").clicked() {
@@ -195,17 +218,17 @@ impl eframe::App for App {
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(self.layout_ready, egui::Button::new("Inspect")).clicked() {
+                    if ui.add_enabled(self.layout_ready(), egui::Button::new("Inspect")).clicked() {
                         self.run_inspect();
                     }
-                    if ui.add_enabled(self.layout_ready, egui::Button::new("Start recovery")).clicked() {
+                    if ui.add_enabled(self.layout_ready(), egui::Button::new("Start recovery")).clicked() {
                         self.run_start();
                     }
                     if ui.button("Finish recovery").clicked() {
                         self.run_finish();
                     }
                 });
-                if !self.layout_ready {
+                if !self.layout_ready() {
                     ui.label("Look up the vault (or load a vault-config JSON) before Inspect / Start.");
                 }
 
@@ -249,62 +272,62 @@ impl App {
         }
     }
 
-    fn apply_lookup(
+    fn apply_reconstructed(
         &mut self,
-        report: LookupReport,
+        rebuilt: chia_vault_recover::ReconstructedVault,
         network: Network,
     ) -> chia_vault_recover::error::Result<()> {
         self.network_mainnet = matches!(network, Network::Mainnet);
-        match report {
-            LookupReport::Reconstructed(discovered) => {
-                let out = if self.config_path.is_empty() {
-                    PathBuf::from("vault-config.json")
-                } else {
-                    PathBuf::from(&self.config_path)
-                };
-                discovered.config.save(&out)?;
-                self.config_path = out.display().to_string();
-                self.layout_ready = true;
-                self.last_guidance = discovered.guidance.clone();
-                self.status = format!(
-                    "Looked up launcher 0x{} ({}). Wrote {}. You do not need a vault-config download.",
-                    hex::encode(discovered.config.launcher_id_bytes()?),
-                    discovered.launcher_source,
-                    out.display()
-                );
-            }
-            LookupReport::ReadyForPhrase {
-                launcher_id,
-                launcher_source,
-                guidance,
-            } => {
-                self.layout_ready = false;
-                self.last_guidance = guidance;
-                self.status = format!(
-                    "Launcher 0x{} from {launcher_source}. Paste the recovery phrase and Look up vault again.",
-                    hex::encode(launcher_id)
-                );
-            }
-            LookupReport::NeedFallback {
-                launcher_id,
-                launcher_source,
-                reason,
-                guidance,
-            } => {
-                self.layout_ready = false;
-                self.last_guidance = guidance;
-                let launcher = match (launcher_id, launcher_source) {
-                    (Some(id), Some(source)) => {
-                        format!(" launcher 0x{} ({source}).", hex::encode(id))
-                    }
-                    (Some(id), None) => format!(" launcher 0x{}.", hex::encode(id)),
-                    _ => String::new(),
-                };
-                self.status =
-                    format!("Lookup needs a self-send or vault-config.{launcher} {reason}");
-            }
-        }
+        let out = if self.config_path.is_empty() {
+            PathBuf::from("vault-config.json")
+        } else {
+            PathBuf::from(&self.config_path)
+        };
+        rebuilt.config.save(&out)?;
+        self.config_path = out.display().to_string();
+        self.step = AppStep::Ready;
+        self.last_guidance = reconstruct_success_guidance(rebuilt.matches_current);
+        self.status = format!(
+            "Looked up launcher 0x{} ({}). Wrote {}. You do not need a vault-config download.",
+            hex::encode(rebuilt.config.launcher_id_bytes()?),
+            rebuilt.launcher_source,
+            out.display()
+        );
         Ok(())
+    }
+
+    fn apply_found(&mut self, found: FoundVault, network: Network) {
+        self.network_mainnet = matches!(network, Network::Mainnet);
+        self.step = AppStep::FoundNeedsPhrase;
+        self.last_guidance = LOOKUP_READY_FOR_PHRASE.to_string();
+        self.status = format!(
+            "Launcher 0x{} from {}. Paste the recovery phrase and Look up vault again.",
+            hex::encode(found.launcher_id),
+            found.launcher_source
+        );
+        self.found = Some(found);
+    }
+
+    fn apply_fallback(
+        &mut self,
+        gap: chia_vault_recover::LookupGap,
+        launcher_id: Option<chia_protocol::Bytes32>,
+        launcher_source: Option<String>,
+        network: Network,
+    ) {
+        self.network_mainnet = matches!(network, Network::Mainnet);
+        self.step = AppStep::NeedFallback;
+        self.found = None;
+        self.last_guidance = fallback_guidance(gap);
+        let launcher = match (launcher_id, launcher_source) {
+            (Some(id), Some(source)) => format!(" launcher 0x{} ({source}).", hex::encode(id)),
+            (Some(id), None) => format!(" launcher 0x{}.", hex::encode(id)),
+            _ => String::new(),
+        };
+        self.status = format!(
+            "Lookup needs a self-send or vault-config.{launcher} {}",
+            gap.headline()
+        );
     }
 
     fn run_lookup(&mut self) {
@@ -315,7 +338,6 @@ impl App {
                     "enter the vault Receive address (xch1… / txch1…) first",
                 ));
             }
-            let (client, network) = self.client_for_vault(vault)?;
             let mnemonic = {
                 let trimmed = self.recovery_mnemonic.trim();
                 if trimmed.is_empty() {
@@ -324,13 +346,44 @@ impl App {
                     Some(trimmed)
                 }
             };
-            let report =
-                runtime().block_on(workflow::lookup(&client, vault, mnemonic, self.clawback()?))?;
-            self.apply_lookup(report, network)?;
+            let cached = self
+                .found
+                .as_ref()
+                .filter(|_| self.last_lookup_vault == vault)
+                .cloned();
+            if let (Some(found), Some(mnemonic)) = (cached, mnemonic) {
+                let (_, network) = self.chain_client()?;
+                let rebuilt = reconstruct(&found, mnemonic, self.clawback()?)?;
+                self.apply_reconstructed(rebuilt, network)?;
+                return Ok(());
+            }
+
+            let (client, network) = client_for_vault(vault, self.network(), &self.backend())?;
+            let report = runtime().block_on(workflow::lookup(&client, vault))?;
+            self.last_lookup_vault = vault.to_string();
+            match report {
+                LookupReport::Found(found) => {
+                    if let Some(mnemonic) = mnemonic {
+                        let rebuilt = reconstruct(&found, mnemonic, self.clawback()?)?;
+                        self.found = Some(found);
+                        self.apply_reconstructed(rebuilt, network)?;
+                    } else {
+                        self.apply_found(found, network);
+                    }
+                }
+                LookupReport::NeedFallback {
+                    gap,
+                    launcher_id,
+                    launcher_source,
+                } => {
+                    self.apply_fallback(gap, launcher_id, launcher_source, network);
+                }
+            }
             Ok::<(), chia_vault_recover::Error>(())
         })();
         if let Err(e) = result {
-            self.layout_ready = false;
+            self.step = AppStep::NeedLookup;
+            self.found = None;
             self.status = format!("Lookup error: {e}");
         }
     }
@@ -338,7 +391,7 @@ impl App {
     fn load_existing_config(&mut self) {
         let result = (|| {
             let config = VaultConfig::load(&self.config_path)?;
-            self.layout_ready = true;
+            self.step = AppStep::Ready;
             self.status = format!(
                 "Loaded {}. launcher {}",
                 self.config_path, config.launcher_id
@@ -348,7 +401,7 @@ impl App {
             Ok::<(), chia_vault_recover::Error>(())
         })();
         if let Err(e) = result {
-            self.layout_ready = false;
+            self.step = AppStep::NeedLookup;
             self.status = format!("Load config error: {e}");
         }
     }
@@ -361,14 +414,7 @@ impl App {
             } else {
                 Some(VaultConfig::load(&self.post_recovery_path)?)
             };
-            let (client, _) = if self.vault_address.trim().is_empty() {
-                (
-                    ChainClient::new(self.network(), &self.backend()),
-                    self.network(),
-                )
-            } else {
-                self.client_for_vault(self.vault_address.trim())?
-            };
+            let (client, _) = self.chain_client()?;
             let report = runtime().block_on(workflow::inspect(&client, &config, post.as_ref()))?;
             self.last_guidance = report.guidance.clone();
             self.status = match report.phase {
@@ -403,14 +449,7 @@ impl App {
                     Some(trimmed)
                 }
             };
-            let (client, network) = if self.vault_address.trim().is_empty() {
-                (
-                    ChainClient::new(self.network(), &self.backend()),
-                    self.network(),
-                )
-            } else {
-                self.client_for_vault(self.vault_address.trim())?
-            };
+            let (client, network) = self.chain_client()?;
             let start = runtime().block_on(workflow::start(
                 &client,
                 StartWorkflow {
@@ -444,14 +483,7 @@ impl App {
         let result = (|| {
             let config = VaultConfig::load(&self.config_path)?;
             let post = VaultConfig::load(&self.post_recovery_path)?;
-            let (client, network) = if self.vault_address.trim().is_empty() {
-                (
-                    ChainClient::new(self.network(), &self.backend()),
-                    self.network(),
-                )
-            } else {
-                self.client_for_vault(self.vault_address.trim())?
-            };
+            let (client, network) = self.chain_client()?;
             let handle = runtime().block_on(workflow::finish(&client, &config, &post, network))?;
             self.status =
                 format!("Finish pushed ({handle}). Vault custody is now the new BLS key.");

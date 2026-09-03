@@ -8,7 +8,9 @@ use chia_sdk_types::Conditions;
 use clvm_utils::TreeHash;
 
 use chia_vault_recover::config::VaultConfig;
-use chia_vault_recover::discover::{custody_from_vault_spend, reconstruct_config};
+use chia_vault_recover::discover::{
+    FoundVault, custody_from_vault_spend, reconstruct, reconstruct_config,
+};
 use chia_vault_recover::keys::{
     MnemonicWordCount, generate_mnemonic, key_from_mnemonic, public_key_to_hex,
 };
@@ -19,7 +21,7 @@ use chia_vault_recover::recovery::{
     start_recovery,
 };
 use chia_vault_recover::vault::{
-    RecoverySignerSet, SignerSet, VaultKeys, VaultMemberKey, get_vault_internals,
+    CustodyPath, RecoverySignerSet, SignerSet, VaultKeys, VaultMemberKey, get_vault_internals,
     recovery_state_hashes,
 };
 
@@ -47,18 +49,16 @@ fn delayed_recovery_bls_phrase_to_new_bls_custody() -> anyhow::Result<()> {
     let recovery_words = recovery.words.clone();
 
     let keys = VaultKeys {
-        custody: SignerSet {
+        custody: CustodyPath::Signers(SignerSet {
             keys: vec![VaultMemberKey::K1(custody.pk)],
             vault_launcher_ids: vec![],
             threshold: 1,
-            hash_override: None,
-        },
+        }),
         recovery: RecoverySignerSet {
             set: SignerSet {
                 keys: vec![VaultMemberKey::Bls(recovery.key_pair.public_key)],
                 vault_launcher_ids: vec![],
                 threshold: 1,
-                hash_override: None,
             },
             clawback_timelock: 10,
         },
@@ -191,18 +191,16 @@ fn discover_custody_from_previous_spend() -> anyhow::Result<()> {
     let recovery_words = recovery.words.clone();
 
     let keys = VaultKeys {
-        custody: SignerSet {
+        custody: CustodyPath::Signers(SignerSet {
             keys: vec![VaultMemberKey::Bls(custody.key_pair.public_key)],
             vault_launcher_ids: vec![],
             threshold: 1,
-            hash_override: None,
-        },
+        }),
         recovery: RecoverySignerSet {
             set: SignerSet {
                 keys: vec![VaultMemberKey::Bls(recovery.key_pair.public_key)],
                 vault_launcher_ids: vec![],
                 threshold: 1,
-                hash_override: None,
             },
             clawback_timelock: 10,
         },
@@ -257,9 +255,45 @@ fn discover_custody_from_previous_spend() -> anyhow::Result<()> {
 
     let reconstructed = reconstruct_config(launcher_id, &path, &recovery_words, 10)?;
     let reconstructed_keys = reconstructed.to_vault_keys()?;
+    assert!(matches!(reconstructed_keys.custody, CustodyPath::Hash(_)));
     let reconstructed_ready = get_vault_internals(launcher_id, &reconstructed_keys)?;
     assert_eq!(reconstructed_ready.full_puzzle_hash, ready.full_puzzle_hash);
     assert_eq!(reconstructed_ready.custody_hash, ready.custody_hash);
+    assert!(matches!(
+        reconstructed.custody.members.first(),
+        Some(chia_vault_recover::VaultConfigMember::PublicKey {
+            key_type: None,
+            curve: chia_vault_recover::Curve::Bls12_381,
+            ..
+        })
+    ));
+
+    let found = FoundVault {
+        launcher_id,
+        launcher_source: "test".into(),
+        custody: path.clone(),
+        current_coin: vault.coin,
+        ancestor_puzzle_hashes: vec![ready.full_puzzle_hash],
+    };
+    let rebuilt = reconstruct(&found, &recovery_words, None)?;
+    assert_eq!(rebuilt.clawback_timelock, 10);
+    assert!(rebuilt.members_complete);
+    assert!(rebuilt.matches_current);
+
+    let hash_only = chia_vault_recover::DiscoveredCustodyPath {
+        custody_hash: path.custody_hash,
+        members: vec![],
+        vault_launcher_ids: vec![],
+    };
+    let hash_config = reconstruct_config(launcher_id, &hash_only, &recovery_words, 10)?;
+    assert!(hash_config.custody.members.is_empty());
+    assert!(hash_config.custody.hash.is_some());
+    let hash_keys = hash_config.to_vault_keys()?;
+    assert!(matches!(hash_keys.custody, CustodyPath::Hash(_)));
+    assert_eq!(
+        get_vault_internals(launcher_id, &hash_keys)?.full_puzzle_hash,
+        ready.full_puzzle_hash
+    );
 
     sim.spend_coins(coin_spends, &[custody.key_pair.secret_key])?;
 
