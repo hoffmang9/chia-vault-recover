@@ -355,12 +355,14 @@ mod key_match_tests {
                 keys: vec![VaultMemberKey::Bls(right.public_key)],
                 vault_launcher_ids: vec![],
                 threshold: 1,
+                hash_override: None,
             },
             recovery: RecoverySignerSet {
                 set: SignerSet {
                     keys: vec![VaultMemberKey::Bls(right.public_key)],
                     vault_launcher_ids: vec![],
                     threshold: 1,
+                    hash_override: None,
                 },
                 clawback_timelock: 1,
             },

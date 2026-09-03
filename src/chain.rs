@@ -24,17 +24,60 @@ impl ChainClient {
     }
 
     pub async fn find_unspent_by_puzzle_hash(&self, puzzle_hash: Bytes32) -> Result<Option<Coin>> {
-        let records = self
-            .inner
-            .get_coin_records_by_puzzle_hash(puzzle_hash, None, None, Some(false), None)
-            .await
-            .map_err(|e| Error::msg(format!("get_coin_records_by_puzzle_hash failed: {e}")))?;
-        Ok(records
-            .coin_records
-            .unwrap_or_default()
+        Ok(self
+            .find_coins_by_puzzle_hash(puzzle_hash, false)
+            .await?
             .into_iter()
             .find(|r| !r.spent)
             .map(|r| r.coin))
+    }
+
+    pub async fn find_coins_by_puzzle_hash(
+        &self,
+        puzzle_hash: Bytes32,
+        include_spent: bool,
+    ) -> Result<Vec<CoinRecord>> {
+        let mut all = Vec::new();
+        let mut cursor = None;
+        for _ in 0..8 {
+            let response = self
+                .inner
+                .get_coin_records_by_puzzle_hash(
+                    puzzle_hash,
+                    None,
+                    None,
+                    Some(include_spent),
+                    cursor,
+                )
+                .await
+                .map_err(|e| Error::msg(format!("get_coin_records_by_puzzle_hash failed: {e}")))?;
+            all.extend(response.coin_records.unwrap_or_default());
+            if response.truncated == Some(true) {
+                cursor = response.next_cursor;
+                if cursor.is_none() {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
+    /// Hint index is optional; backends that lack it return an empty list.
+    pub async fn find_coins_by_hint(
+        &self,
+        hint: Bytes32,
+        include_spent: bool,
+    ) -> Result<Vec<CoinRecord>> {
+        match self
+            .inner
+            .get_coin_records_by_hint(hint, None, None, Some(include_spent), None)
+            .await
+        {
+            Ok(response) => Ok(response.coin_records.unwrap_or_default()),
+            Err(_) => Ok(Vec::new()),
+        }
     }
 
     pub async fn get_coin_record(&self, coin_id: Bytes32) -> Result<Option<CoinRecord>> {
@@ -44,6 +87,52 @@ impl ChainClient {
             .await
             .map_err(|e| Error::msg(format!("get_coin_record_by_name failed: {e}")))?;
         Ok(response.coin_record)
+    }
+
+    pub async fn get_children(&self, parent_id: Bytes32) -> Result<Vec<CoinRecord>> {
+        let response = self
+            .inner
+            .get_coin_records_by_parent_ids(vec![parent_id], None, None, Some(true), None)
+            .await
+            .map_err(|e| Error::msg(format!("get_coin_records_by_parent_ids failed: {e}")))?;
+        Ok(response.coin_records.unwrap_or_default())
+    }
+
+    pub async fn get_spend(
+        &self,
+        coin_id: Bytes32,
+        spent_height: u32,
+    ) -> Result<Option<CoinSpend>> {
+        let response = self
+            .inner
+            .get_puzzle_and_solution(coin_id, Some(spent_height))
+            .await
+            .map_err(|e| Error::msg(format!("get_puzzle_and_solution failed: {e}")))?;
+        Ok(response.coin_solution)
+    }
+
+    /// Walk the singleton from `launcher_id` to the current unspent coin.
+    /// Returns `(spent_ancestors, current_unspent)`.
+    pub async fn walk_singleton_chain(
+        &self,
+        launcher_id: Bytes32,
+    ) -> Result<(Vec<CoinRecord>, CoinRecord)> {
+        let mut parent = launcher_id;
+        let mut spent = Vec::new();
+        for _ in 0..1024 {
+            let children = self.get_children(parent).await?;
+            let Some(child) = children.into_iter().find(|r| r.coin.amount % 2 == 1) else {
+                return Err(Error::msg(
+                    "no singleton child found — launcher id may be wrong or the vault was never launched",
+                ));
+            };
+            if !child.spent {
+                return Ok((spent, child));
+            }
+            parent = child.coin.coin_id();
+            spent.push(child);
+        }
+        Err(Error::msg("singleton chain exceeded 1024 coins"))
     }
 
     /// Build a lineage (or eve) proof for a singleton coin from its parent spend.

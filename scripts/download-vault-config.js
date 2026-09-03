@@ -1,8 +1,12 @@
 /**
- * Download Cloud Wallet vault-config JSON from a logged-in browser tab.
+ * Fallback: download Cloud Wallet vault-config JSON from a logged-in tab.
  *
- * Cloud Wallet does not yet expose a download button on vault.chia.net.
- * GUI support for this export is coming soon. Until then, paste this file
+ * Prefer chia-vault-recover lookup --vault xch1… first. You only need this
+ * file if lookup says the vault has not yet published its layout on chain
+ * and you do not want to (or cannot) send a small self-transfer from
+ * vault.chia.net.
+ *
+ * Cloud Wallet does not yet expose a download button. Paste this file
  * into the browser console while logged in.
  *
  * Usage:

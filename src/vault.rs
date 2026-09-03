@@ -32,6 +32,9 @@ pub struct SignerSet {
     pub keys: Vec<VaultMemberKey>,
     pub vault_launcher_ids: Vec<Bytes32>,
     pub threshold: usize,
+    /// When set (e.g. discovered from a previous spend), used instead of hashing members.
+    /// Members may be incomplete for M-of-N custody; the hash is the source of truth.
+    pub hash_override: Option<TreeHash>,
 }
 
 #[derive(Debug, Clone)]
@@ -241,7 +244,14 @@ pub fn insert_recovery_restriction_spends(
     Ok(())
 }
 
+pub(crate) fn custody_hash_from_set(custody: &SignerSet) -> Result<TreeHash> {
+    custody_member_hash(custody)
+}
+
 fn custody_member_hash(custody: &SignerSet) -> Result<TreeHash> {
+    if let Some(hash) = custody.hash_override {
+        return Ok(hash);
+    }
     let mut hashes = member_hashes(custody, true)?;
     sort_hashes(&mut hashes);
     if hashes.len() == 1 && custody.threshold == 1 {

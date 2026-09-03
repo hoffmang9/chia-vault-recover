@@ -8,8 +8,16 @@ use clvm_utils::TreeHash;
 
 use crate::chain::ChainClient;
 use crate::config::VaultConfig;
+use crate::discover::{
+    DEFAULT_TIMELOCK_CANDIDATES, DiscoverReport, config_matches_puzzle_hash,
+    custody_from_vault_spend, reconstruct_config,
+};
 use crate::error::{Error, Result};
+use crate::guidance::{
+    LOOKUP_READY_FOR_PHRASE, LOOKUP_SUCCESS_NO_JSON, LookupGap, fallback_guidance,
+};
 use crate::keys::MnemonicWordCount;
+use crate::locate::{parse_vault_locator, resolve_launcher_id};
 use crate::network::Network;
 use crate::recovery::{
     FinishRecoveryParams, InspectReport, StartRecoveryParams, StartRecoveryResult, VaultPhase,
@@ -174,4 +182,164 @@ pub async fn finish(
         network,
     })?;
     client.push_tx(&bundle).await
+}
+
+/// Result of looking up a vault from its receive address (or launcher id).
+#[derive(Debug, Clone)]
+pub enum LookupReport {
+    /// Custody path matched; public vault-config was rebuilt. JSON download is not needed.
+    Reconstructed(DiscoverReport),
+    /// Launcher and custody spend are on chain; recovery phrase is required to finish rebuild.
+    ReadyForPhrase {
+        launcher_id: chia_protocol::Bytes32,
+        launcher_source: String,
+        guidance: String,
+    },
+    /// Chain does not yet reveal enough. User should self-send or download vault-config.
+    NeedFallback {
+        launcher_id: Option<chia_protocol::Bytes32>,
+        launcher_source: Option<String>,
+        reason: String,
+        guidance: String,
+    },
+}
+
+/// Address-first lookup: resolve launcher, see if a vault-config JSON is needed.
+///
+/// Pass `recovery_mnemonic` to rebuild the public layout when the chain has it.
+pub async fn lookup(
+    client: &ChainClient,
+    vault: &str,
+    recovery_mnemonic: Option<&str>,
+    clawback_timelock: Option<u64>,
+) -> Result<LookupReport> {
+    let locator = parse_vault_locator(vault)?;
+    let resolved = match resolve_launcher_id(client, &locator).await {
+        Ok(resolved) => resolved,
+        Err(e) => {
+            return Ok(LookupReport::NeedFallback {
+                launcher_id: None,
+                launcher_source: None,
+                reason: e.to_string(),
+                guidance: fallback_guidance(LookupGap::LauncherNotFound),
+            });
+        }
+    };
+    let launcher_id = resolved.launcher_id;
+    let launcher_source = resolved.source;
+
+    let (spent, current) = match client.walk_singleton_chain(launcher_id).await {
+        Ok(chain) => chain,
+        Err(e) => {
+            return Ok(LookupReport::NeedFallback {
+                launcher_id: Some(launcher_id),
+                launcher_source: Some(launcher_source),
+                reason: e.to_string(),
+                guidance: fallback_guidance(LookupGap::LauncherNotFound),
+            });
+        }
+    };
+    if spent.is_empty() {
+        return Ok(LookupReport::NeedFallback {
+            launcher_id: Some(launcher_id),
+            launcher_source: Some(launcher_source),
+            reason: LookupGap::SingletonNeverSpent.headline().to_string(),
+            guidance: fallback_guidance(LookupGap::SingletonNeverSpent),
+        });
+    }
+
+    let mut last_parse_error = None;
+    let mut custody = None;
+    for record in spent.iter().rev() {
+        let Some(spend) = client
+            .get_spend(record.coin.coin_id(), record.spent_block_index)
+            .await?
+        else {
+            continue;
+        };
+        match custody_from_vault_spend(&spend) {
+            Ok(Some(path)) => {
+                custody = Some(path);
+                break;
+            }
+            Ok(None) => {}
+            Err(e) => last_parse_error = Some(e),
+        }
+    }
+    let Some(custody) = custody else {
+        let reason = last_parse_error
+            .map(|e| e.to_string())
+            .unwrap_or_else(|| LookupGap::NoCustodySpend.headline().to_string());
+        return Ok(LookupReport::NeedFallback {
+            launcher_id: Some(launcher_id),
+            launcher_source: Some(launcher_source),
+            reason,
+            guidance: fallback_guidance(LookupGap::NoCustodySpend),
+        });
+    };
+
+    let Some(recovery_mnemonic) = recovery_mnemonic.filter(|s| !s.trim().is_empty()) else {
+        return Ok(LookupReport::ReadyForPhrase {
+            launcher_id,
+            launcher_source,
+            guidance: LOOKUP_READY_FOR_PHRASE.to_string(),
+        });
+    };
+
+    let candidates: Vec<u64> = if let Some(secs) = clawback_timelock {
+        vec![secs]
+    } else {
+        DEFAULT_TIMELOCK_CANDIDATES.to_vec()
+    };
+
+    for &timelock in &candidates {
+        let config = reconstruct_config(launcher_id, &custody, recovery_mnemonic, timelock)?;
+        let ready_match = config_matches_puzzle_hash(&config, current.coin.puzzle_hash)?;
+        let ancestor_match = spent
+            .iter()
+            .any(|r| config_matches_puzzle_hash(&config, r.coin.puzzle_hash).unwrap_or(false));
+        if ready_match || ancestor_match {
+            let members_complete = !config.custody.members.is_empty();
+            let match_note = if ready_match {
+                "Reconstructed config matches the current unspent singleton (READY)."
+            } else {
+                "Reconstructed config matches a previous singleton state (vault may be in RECOVERY)."
+            };
+            return Ok(LookupReport::Reconstructed(DiscoverReport {
+                config,
+                custody_hash: custody.custody_hash,
+                clawback_timelock: timelock,
+                current_coin: current.coin,
+                members_complete,
+                guidance: format!("{LOOKUP_SUCCESS_NO_JSON} {match_note}"),
+                launcher_source,
+            }));
+        }
+    }
+
+    Err(Error::msg(format!(
+        "found custody hash 0x{} but no candidate timelock produced a matching vault puzzle hash. \
+         Pass --clawback-secs explicitly (Cloud Wallet default is 43200)",
+        hex::encode(custody.custody_hash)
+    )))
+}
+
+/// Walk the singleton, parse a previous custody spend, and rebuild a vault-config.
+///
+/// `vault` is a receive address (`xch1…` / `txch1…`) or a launcher id.
+pub async fn discover(
+    client: &ChainClient,
+    vault: &str,
+    recovery_mnemonic: &str,
+    clawback_timelock: Option<u64>,
+) -> Result<DiscoverReport> {
+    match lookup(client, vault, Some(recovery_mnemonic), clawback_timelock).await? {
+        LookupReport::Reconstructed(report) => Ok(report),
+        LookupReport::ReadyForPhrase { .. } => Err(Error::msg(
+            "recovery mnemonic required to rebuild vault layout",
+        )),
+        LookupReport::NeedFallback {
+            reason, guidance, ..
+        } => Err(Error::msg(format!("{reason}\n\n{guidance}"))),
+    }
 }

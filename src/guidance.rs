@@ -1,0 +1,88 @@
+//! End-user guidance for the address-first lookup flow.
+
+/// Why chain lookup could not rebuild the vault layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LookupGap {
+    /// Address unused, never spent, or parent spends did not reveal a launcher.
+    LauncherNotFound,
+    /// Launcher is known but the singleton has never been spent (eve only).
+    SingletonNeverSpent,
+    /// Singleton spends exist but none used the current custody path.
+    NoCustodySpend,
+}
+
+impl LookupGap {
+    pub fn headline(self) -> &'static str {
+        match self {
+            Self::LauncherNotFound => {
+                "Could not find this vault’s launcher id from the address alone."
+            }
+            Self::SingletonNeverSpent => {
+                "Found the launcher, but this vault has never been spent with the current setup."
+            }
+            Self::NoCustodySpend => {
+                "Found the launcher, but no previous custody spend is on chain."
+            }
+        }
+    }
+
+    pub fn detail(self) -> &'static str {
+        match self {
+            Self::LauncherNotFound => {
+                "A Cloud Wallet receive address does not contain the launcher id. \
+                 The tool can only recover it from a spent coin at that address \
+                 (or from a parent vault spend)."
+            }
+            Self::SingletonNeverSpent => {
+                "An unspent eve singleton does not reveal the custody path. \
+                 You need one send from the vault, or a vault-config JSON."
+            }
+            Self::NoCustodySpend => {
+                "Recovery-only spends are not enough. A send that uses the vault’s \
+                 passkey (custody) publishes the layout this tool needs."
+            }
+        }
+    }
+}
+
+/// What to do when chain lookup cannot replace `vault-config-*.json`.
+pub fn fallback_guidance(gap: LookupGap) -> String {
+    format!("{}\n{}\n\n{}", gap.headline(), gap.detail(), FALLBACK_STEPS)
+}
+
+pub const FALLBACK_STEPS: &str = "\
+A vault-config JSON is required unless the vault has already published its layout on chain.
+
+If you can still open this vault at https://vault.chia.net:
+
+1. Preferred — send any amount from the vault back to the same Receive address \
+(or any address you control). A self-send is enough. Cloud Wallet spends the vault \
+singleton with your passkey, which publishes the launcher id and custody path. \
+Wait until that transaction confirms, then look up the same address again.
+
+2. Or download the public vault-config JSON without sending: while logged in, \
+open DevTools → Console (macOS: Option-Command-J; Windows/Linux: Ctrl+Shift+J), \
+paste scripts/download-vault-config.js, and press Enter. Then run \
+`chia-vault-recover inspect --config vault-config-….json`.
+
+If you cannot access Cloud Wallet, you need a vault-config-*.json you saved earlier.";
+
+pub const LOOKUP_SUCCESS_NO_JSON: &str =
+    "Vault layout rebuilt from chain. You do not need a vault-config-*.json download.";
+
+pub const LOOKUP_READY_FOR_PHRASE: &str = "\
+Launcher and custody path are on chain. You do not need a vault-config-*.json download. \
+Enter the Cloud Wallet recovery phrase to rebuild the public layout and continue.";
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fallback_mentions_self_send_and_script() {
+        let text = fallback_guidance(LookupGap::LauncherNotFound);
+        assert!(text.contains("self-send"));
+        assert!(text.contains("download-vault-config.js"));
+        assert!(text.contains("vault.chia.net"));
+    }
+}

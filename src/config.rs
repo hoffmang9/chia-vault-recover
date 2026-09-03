@@ -4,6 +4,7 @@ use std::fs;
 use std::path::Path;
 
 use chia_protocol::Bytes32;
+use clvm_utils::TreeHash;
 use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
@@ -53,7 +54,11 @@ pub enum VaultConfigMember {
 #[serde(rename_all = "camelCase")]
 pub struct VaultConfigSide {
     pub threshold: u32,
+    #[serde(default)]
     pub members: Vec<VaultConfigMember>,
+    /// MIPS custody-path hash. Required when `members` is empty (on-chain discovery).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -112,6 +117,7 @@ impl VaultConfig {
                     curve: Curve::Bls12_381,
                     key_type: Some(KeyType::RecoveryPhrase),
                 }],
+                hash: None,
             },
             recovery: VaultConfigRecovery {
                 threshold: 1,
@@ -139,13 +145,21 @@ fn side_to_signers(side: &VaultConfigSide) -> Result<crate::vault::SignerSet> {
             }
         }
     }
-    if keys.is_empty() && vault_launcher_ids.is_empty() {
-        return Err(Error::msg("custody/recovery side has no members"));
+    let hash_override = side
+        .hash
+        .as_ref()
+        .map(|h| parse_bytes32(h).map(TreeHash::from))
+        .transpose()?;
+    if keys.is_empty() && vault_launcher_ids.is_empty() && hash_override.is_none() {
+        return Err(Error::msg(
+            "custody/recovery side has no members and no hash",
+        ));
     }
     Ok(crate::vault::SignerSet {
         keys,
         vault_launcher_ids,
         threshold: side.threshold as usize,
+        hash_override,
     })
 }
 
@@ -154,6 +168,7 @@ fn recovery_to_signers(side: &VaultConfigRecovery) -> Result<crate::vault::Recov
         set: side_to_signers(&VaultConfigSide {
             threshold: side.threshold,
             members: side.members.clone(),
+            hash: None,
         })?,
         clawback_timelock: side.clawback_timelock,
     })
