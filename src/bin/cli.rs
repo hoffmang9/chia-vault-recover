@@ -39,43 +39,7 @@ enum Commands {
         backend: BackendArgs,
     },
     /// Start delayed recovery (signs with the Cloud Wallet recovery phrase)
-    Start {
-        /// Vault Receive address. Looks up the vault and rebuilds layout if `--config` is omitted.
-        #[arg(long, alias = "address")]
-        vault: Option<String>,
-        #[arg(long)]
-        config: Option<PathBuf>,
-        #[arg(long, env = "CHIA_VAULT_RECOVERY_MNEMONIC")]
-        recovery_mnemonic: Option<String>,
-        #[arg(long)]
-        recovery_mnemonic_file: Option<PathBuf>,
-        #[arg(long, env = "CHIA_VAULT_NEW_CUSTODY_MNEMONIC")]
-        new_custody_mnemonic: Option<String>,
-        #[arg(long)]
-        new_custody_mnemonic_file: Option<PathBuf>,
-        #[arg(long)]
-        new_recovery_mnemonic: Option<String>,
-        #[arg(long)]
-        new_recovery_mnemonic_file: Option<PathBuf>,
-        #[arg(long, default_value = "24")]
-        word_count: u8,
-        #[arg(long)]
-        new_clawback_secs: Option<u64>,
-        /// Current vault clawback window in seconds. If you know it, pass it.
-        /// If omitted, common Cloud Wallet values (including 43200 / 12h) are
-        /// tried until the reconstructed spend matches the chain.
-        #[arg(long)]
-        clawback_secs: Option<u64>,
-        #[arg(long, default_value = "mainnet")]
-        network: NetworkArg,
-        #[command(flatten)]
-        backend: BackendArgs,
-        #[arg(long, default_value = "post-recovery-vault-config.json")]
-        out_config: PathBuf,
-        /// Where to write the rebuilt public layout when starting from `--vault`.
-        #[arg(long, default_value = "vault-config.json")]
-        lookup_config: PathBuf,
-    },
+    Start(Box<StartArgs>),
     /// Finish delayed recovery after the clawback timelock
     Finish {
         #[arg(long)]
@@ -98,6 +62,45 @@ enum Commands {
         #[arg(long)]
         post_recovery_config: Option<PathBuf>,
     },
+}
+
+#[derive(Clone, Debug, clap::Args)]
+struct StartArgs {
+    /// Vault Receive address. Looks up the vault and rebuilds layout if `--config` is omitted.
+    #[arg(long, alias = "address")]
+    vault: Option<String>,
+    #[arg(long)]
+    config: Option<PathBuf>,
+    #[arg(long, env = "CHIA_VAULT_RECOVERY_MNEMONIC")]
+    recovery_mnemonic: Option<String>,
+    #[arg(long)]
+    recovery_mnemonic_file: Option<PathBuf>,
+    #[arg(long, env = "CHIA_VAULT_NEW_CUSTODY_MNEMONIC")]
+    new_custody_mnemonic: Option<String>,
+    #[arg(long)]
+    new_custody_mnemonic_file: Option<PathBuf>,
+    #[arg(long)]
+    new_recovery_mnemonic: Option<String>,
+    #[arg(long)]
+    new_recovery_mnemonic_file: Option<PathBuf>,
+    #[arg(long, default_value = "24")]
+    word_count: u8,
+    #[arg(long)]
+    new_clawback_secs: Option<u64>,
+    /// Current vault clawback window in seconds. If you know it, pass it.
+    /// If omitted, common Cloud Wallet values (including 43200 / 12h) are
+    /// tried until the reconstructed spend matches the chain.
+    #[arg(long)]
+    clawback_secs: Option<u64>,
+    #[arg(long, default_value = "mainnet")]
+    network: NetworkArg,
+    #[command(flatten)]
+    backend: BackendArgs,
+    #[arg(long, default_value = "post-recovery-vault-config.json")]
+    out_config: PathBuf,
+    /// Where to write the rebuilt public layout when starting from `--vault`.
+    #[arg(long, default_value = "vault-config.json")]
+    lookup_config: PathBuf,
 }
 
 #[derive(Clone, Debug, ValueEnum)]
@@ -168,23 +171,24 @@ async fn main() -> Result<()> {
                 }
             }
         }
-        Commands::Start {
-            vault,
-            config,
-            recovery_mnemonic,
-            recovery_mnemonic_file,
-            new_custody_mnemonic,
-            new_custody_mnemonic_file,
-            new_recovery_mnemonic,
-            new_recovery_mnemonic_file,
-            word_count,
-            new_clawback_secs,
-            clawback_secs,
-            network,
-            backend,
-            out_config,
-            lookup_config,
-        } => {
+        Commands::Start(start) => {
+            let StartArgs {
+                vault,
+                config,
+                recovery_mnemonic,
+                recovery_mnemonic_file,
+                new_custody_mnemonic,
+                new_custody_mnemonic_file,
+                new_recovery_mnemonic,
+                new_recovery_mnemonic_file,
+                word_count,
+                new_clawback_secs,
+                clawback_secs,
+                network,
+                backend,
+                out_config,
+                lookup_config,
+            } = *start;
             let recovery_mnemonic =
                 read_mnemonic(recovery_mnemonic, recovery_mnemonic_file, "recovery")?;
             let new_custody_mnemonic = read_mnemonic(
