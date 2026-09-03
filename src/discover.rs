@@ -59,12 +59,8 @@ pub struct FoundVault {
 
 #[derive(Debug, Clone)]
 pub struct ReconstructedVault {
+    pub found: FoundVault,
     pub config: VaultConfig,
-    pub custody_hash: TreeHash,
-    pub clawback_timelock: u64,
-    pub current_coin: Coin,
-    pub members_complete: bool,
-    pub launcher_source: String,
     pub matches_current: bool,
 }
 
@@ -187,12 +183,8 @@ pub fn reconstruct(
             .any(|ph| config_matches_puzzle_hash(&config, *ph).unwrap_or(false));
         if ready_match || ancestor_match {
             return Ok(ReconstructedVault {
+                found: found.clone(),
                 config,
-                custody_hash: found.custody.custody_hash,
-                clawback_timelock: timelock,
-                current_coin: found.current_coin,
-                members_complete: found.custody.members_complete(),
-                launcher_source: found.launcher_source.clone(),
                 matches_current: ready_match,
             });
         }

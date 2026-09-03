@@ -276,8 +276,8 @@ fn discover_custody_from_previous_spend() -> anyhow::Result<()> {
         ancestor_puzzle_hashes: vec![ready.full_puzzle_hash],
     };
     let rebuilt = reconstruct(&found, &recovery_words, None)?;
-    assert_eq!(rebuilt.clawback_timelock, 10);
-    assert!(rebuilt.members_complete);
+    assert_eq!(rebuilt.config.recovery.clawback_timelock, 10);
+    assert!(rebuilt.found.custody.members_complete());
     assert!(rebuilt.matches_current);
 
     let hash_only = chia_vault_recover::DiscoveredCustodyPath {

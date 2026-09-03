@@ -42,14 +42,19 @@ fn main() -> eframe::Result<()> {
 
 enum AppStep {
     NeedLookup,
-    FoundNeedsPhrase,
-    NeedFallback,
-    Ready,
+    Found {
+        vault_input: String,
+        found: FoundVault,
+    },
+    NeedFallback(chia_vault_recover::LookupGap),
+    Ready {
+        vault_input: Option<String>,
+        found: Option<FoundVault>,
+    },
 }
 
 struct App {
     vault_address: String,
-    last_lookup_vault: String,
     config_path: String,
     post_recovery_path: String,
     clawback_secs: String,
@@ -63,14 +68,12 @@ struct App {
     generated_recovery_mnemonic: Option<String>,
     last_guidance: String,
     step: AppStep,
-    found: Option<FoundVault>,
 }
 
 impl Default for App {
     fn default() -> Self {
         Self {
             vault_address: String::new(),
-            last_lookup_vault: String::new(),
             config_path: String::new(),
             post_recovery_path: String::new(),
             clawback_secs: String::new(),
@@ -86,7 +89,6 @@ impl Default for App {
                 "Enter the vault Receive address (xch1… / txch1…) from Cloud Wallet, then click Look up vault.",
             ),
             step: AppStep::NeedLookup,
-            found: None,
         }
     }
 }
@@ -124,7 +126,27 @@ impl App {
     }
 
     fn layout_ready(&self) -> bool {
-        matches!(self.step, AppStep::Ready)
+        matches!(self.step, AppStep::Ready { .. })
+    }
+
+    fn guidance(&self) -> String {
+        match &self.step {
+            AppStep::NeedFallback(gap) => fallback_guidance(gap),
+            _ => self.last_guidance.clone(),
+        }
+    }
+
+    fn cached_found(&self, vault: &str) -> Option<&FoundVault> {
+        match &self.step {
+            AppStep::Found {
+                vault_input, found, ..
+            } if vault_input == vault => Some(found),
+            AppStep::Ready {
+                vault_input: Some(input),
+                found: Some(found),
+            } if input == vault => Some(found),
+            _ => None,
+        }
     }
 }
 
@@ -180,7 +202,10 @@ impl eframe::App for App {
                             && let Some(path) = rfd::FileDialog::new().pick_file()
                         {
                             self.config_path = path.display().to_string();
-                            self.step = AppStep::Ready;
+                            self.step = AppStep::Ready {
+                                vault_input: None,
+                                found: None,
+                            };
                         }
                     });
                     if ui.button("Load config").clicked() {
@@ -245,10 +270,11 @@ impl eframe::App for App {
                     }
                 }
 
-                if !self.last_guidance.is_empty() {
+                let guidance = self.guidance();
+                if !guidance.is_empty() {
                     ui.separator();
                     ui.strong("What next");
-                    ui.label(&self.last_guidance);
+                    ui.label(guidance);
                 }
                 if !self.status.is_empty() {
                     ui.separator();
@@ -285,49 +311,45 @@ impl App {
         };
         rebuilt.config.save(&out)?;
         self.config_path = out.display().to_string();
-        self.step = AppStep::Ready;
         self.last_guidance = reconstruct_success_guidance(rebuilt.matches_current);
         self.status = format!(
             "Looked up launcher 0x{} ({}). Wrote {}. You do not need a vault-config download.",
             hex::encode(rebuilt.config.launcher_id_bytes()?),
-            rebuilt.launcher_source,
+            rebuilt.found.launcher_source,
             out.display()
         );
+        self.step = AppStep::Ready {
+            vault_input: Some(self.vault_address.trim().to_string()),
+            found: Some(rebuilt.found),
+        };
         Ok(())
     }
 
     fn apply_found(&mut self, found: FoundVault, network: Network) {
         self.network_mainnet = matches!(network, Network::Mainnet);
-        self.step = AppStep::FoundNeedsPhrase;
         self.last_guidance = LOOKUP_READY_FOR_PHRASE.to_string();
         self.status = format!(
             "Launcher 0x{} from {}. Paste the recovery phrase and Look up vault again.",
             hex::encode(found.launcher_id),
             found.launcher_source
         );
-        self.found = Some(found);
+        self.step = AppStep::Found {
+            vault_input: self.vault_address.trim().to_string(),
+            found,
+        };
     }
 
-    fn apply_fallback(
-        &mut self,
-        gap: chia_vault_recover::LookupGap,
-        launcher_id: Option<chia_protocol::Bytes32>,
-        launcher_source: Option<String>,
-        network: Network,
-    ) {
+    fn apply_fallback(&mut self, gap: chia_vault_recover::LookupGap, network: Network) {
         self.network_mainnet = matches!(network, Network::Mainnet);
-        self.step = AppStep::NeedFallback;
-        self.found = None;
-        self.last_guidance = fallback_guidance(gap);
-        let launcher = match (launcher_id, launcher_source) {
-            (Some(id), Some(source)) => format!(" launcher 0x{} ({source}).", hex::encode(id)),
-            (Some(id), None) => format!(" launcher 0x{}.", hex::encode(id)),
-            _ => String::new(),
+        let launcher = match gap.known_launcher() {
+            Some(known) => format!(" launcher 0x{} ({}).", hex::encode(known.id), known.source),
+            None => String::new(),
         };
         self.status = format!(
             "Lookup needs a self-send or vault-config.{launcher} {}",
             gap.headline()
         );
+        self.step = AppStep::NeedFallback(gap);
     }
 
     fn run_lookup(&mut self) {
@@ -346,12 +368,7 @@ impl App {
                     Some(trimmed)
                 }
             };
-            let cached = self
-                .found
-                .as_ref()
-                .filter(|_| self.last_lookup_vault == vault)
-                .cloned();
-            if let (Some(found), Some(mnemonic)) = (cached, mnemonic) {
+            if let (Some(found), Some(mnemonic)) = (self.cached_found(vault).cloned(), mnemonic) {
                 let (_, network) = self.chain_client()?;
                 let rebuilt = reconstruct(&found, mnemonic, self.clawback()?)?;
                 self.apply_reconstructed(rebuilt, network)?;
@@ -360,30 +377,23 @@ impl App {
 
             let (client, network) = client_for_vault(vault, self.network(), &self.backend())?;
             let report = runtime().block_on(workflow::lookup(&client, vault))?;
-            self.last_lookup_vault = vault.to_string();
             match report {
                 LookupReport::Found(found) => {
                     if let Some(mnemonic) = mnemonic {
                         let rebuilt = reconstruct(&found, mnemonic, self.clawback()?)?;
-                        self.found = Some(found);
                         self.apply_reconstructed(rebuilt, network)?;
                     } else {
                         self.apply_found(found, network);
                     }
                 }
-                LookupReport::NeedFallback {
-                    gap,
-                    launcher_id,
-                    launcher_source,
-                } => {
-                    self.apply_fallback(gap, launcher_id, launcher_source, network);
+                LookupReport::NeedFallback(gap) => {
+                    self.apply_fallback(gap, network);
                 }
             }
             Ok::<(), chia_vault_recover::Error>(())
         })();
         if let Err(e) = result {
             self.step = AppStep::NeedLookup;
-            self.found = None;
             self.status = format!("Lookup error: {e}");
         }
     }
@@ -391,7 +401,10 @@ impl App {
     fn load_existing_config(&mut self) {
         let result = (|| {
             let config = VaultConfig::load(&self.config_path)?;
-            self.step = AppStep::Ready;
+            self.step = AppStep::Ready {
+                vault_input: None,
+                found: None,
+            };
             self.status = format!(
                 "Loaded {}. launcher {}",
                 self.config_path, config.launcher_id

@@ -10,7 +10,7 @@ use crate::chain::ChainClient;
 use crate::config::VaultConfig;
 use crate::discover::{FoundVault, custody_from_vault_spend};
 use crate::error::{Error, Result};
-use crate::guidance::LookupGap;
+use crate::guidance::{KnownLauncher, LookupGap};
 use crate::keys::MnemonicWordCount;
 use crate::locate::{parse_vault_locator, resolve_launcher_id};
 use crate::network::Network;
@@ -186,11 +186,7 @@ pub async fn finish(
 #[derive(Debug, Clone)]
 pub enum LookupReport {
     Found(FoundVault),
-    NeedFallback {
-        gap: LookupGap,
-        launcher_id: Option<chia_protocol::Bytes32>,
-        launcher_source: Option<String>,
-    },
+    NeedFallback(LookupGap),
 }
 
 /// Address-first lookup: resolve launcher and a prior custody spend.
@@ -199,11 +195,7 @@ pub async fn lookup(client: &ChainClient, vault: &str) -> Result<LookupReport> {
     let resolved = match resolve_launcher_id(client, &locator).await {
         Ok(resolved) => resolved,
         Err(_) => {
-            return Ok(LookupReport::NeedFallback {
-                gap: LookupGap::LauncherNotFound,
-                launcher_id: None,
-                launcher_source: None,
-            });
+            return Ok(LookupReport::NeedFallback(LookupGap::LauncherNotFound));
         }
     };
 
@@ -240,11 +232,10 @@ pub(crate) fn classify_lookup(
     custody: Option<crate::discover::DiscoveredCustodyPath>,
 ) -> LookupReport {
     if ancestor_puzzle_hashes.is_empty() {
-        return LookupReport::NeedFallback {
-            gap: LookupGap::SingletonNeverSpent,
-            launcher_id: Some(launcher_id),
-            launcher_source: Some(launcher_source),
-        };
+        return LookupReport::NeedFallback(LookupGap::SingletonNeverSpent(KnownLauncher {
+            id: launcher_id,
+            source: launcher_source,
+        }));
     }
     match custody {
         Some(custody) => LookupReport::Found(FoundVault {
@@ -254,11 +245,10 @@ pub(crate) fn classify_lookup(
             current_coin,
             ancestor_puzzle_hashes,
         }),
-        None => LookupReport::NeedFallback {
-            gap: LookupGap::NoCustodySpend,
-            launcher_id: Some(launcher_id),
-            launcher_source: Some(launcher_source),
-        },
+        None => LookupReport::NeedFallback(LookupGap::NoCustodySpend(KnownLauncher {
+            id: launcher_id,
+            source: launcher_source,
+        })),
     }
 }
 
@@ -286,11 +276,9 @@ mod tests {
     fn classify_empty_ancestors_is_never_spent() {
         let launcher = Bytes32::new([0xaa; 32]);
         match classify_lookup(launcher, "test".into(), coin(), vec![], Some(custody())) {
-            LookupReport::NeedFallback {
-                gap: LookupGap::SingletonNeverSpent,
-                launcher_id: Some(id),
-                ..
-            } => assert_eq!(id, launcher),
+            LookupReport::NeedFallback(LookupGap::SingletonNeverSpent(known)) => {
+                assert_eq!(known.id, launcher);
+            }
             other => panic!("unexpected {other:?}"),
         }
     }
@@ -304,10 +292,7 @@ mod tests {
             vec![Bytes32::new([0x04; 32])],
             None,
         ) {
-            LookupReport::NeedFallback {
-                gap: LookupGap::NoCustodySpend,
-                ..
-            } => {}
+            LookupReport::NeedFallback(LookupGap::NoCustodySpend(_)) => {}
             other => panic!("unexpected {other:?}"),
         }
     }

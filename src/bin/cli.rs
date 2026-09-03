@@ -1,7 +1,6 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
-use chia_protocol::Bytes32;
 use chia_vault_recover::chain::ChainClient;
 use chia_vault_recover::config::VaultConfig;
 use chia_vault_recover::discover::{FoundVault, ReconstructedVault, reconstruct};
@@ -180,12 +179,8 @@ async fn main() -> Result<()> {
                         );
                     }
                 }
-                LookupReport::NeedFallback {
-                    gap,
-                    launcher_id,
-                    launcher_source,
-                } => {
-                    print_fallback(network, launcher_id, launcher_source.as_deref(), gap);
+                LookupReport::NeedFallback(gap) => {
+                    print_fallback(network, &gap);
                     std::process::exit(2);
                 }
             }
@@ -218,12 +213,8 @@ async fn main() -> Result<()> {
                     let report = workflow::lookup(&client, &vault).await?;
                     let found = match report {
                         LookupReport::Found(found) => found,
-                        LookupReport::NeedFallback {
-                            gap,
-                            launcher_id,
-                            launcher_source,
-                        } => {
-                            print_fallback(network, launcher_id, launcher_source.as_deref(), gap);
+                        LookupReport::NeedFallback(gap) => {
+                            print_fallback(network, &gap);
                             bail!("cannot start recovery until lookup finds a custody spend");
                         }
                     };
@@ -363,14 +354,20 @@ fn print_reconstructed(
         "launcher_id: 0x{}",
         hex::encode(rebuilt.config.launcher_id_bytes()?)
     );
-    println!("resolved_from: {}", rebuilt.launcher_source);
-    println!("custody_hash: 0x{}", hex::encode(rebuilt.custody_hash));
-    println!("clawback_timelock_secs: {}", rebuilt.clawback_timelock);
+    println!("resolved_from: {}", rebuilt.found.launcher_source);
+    println!(
+        "custody_hash: 0x{}",
+        hex::encode(rebuilt.found.custody.custody_hash)
+    );
+    println!(
+        "clawback_timelock_secs: {}",
+        rebuilt.config.recovery.clawback_timelock
+    );
     println!(
         "current_coin: 0x{}",
-        hex::encode(rebuilt.current_coin.coin_id())
+        hex::encode(rebuilt.found.current_coin.coin_id())
     );
-    if rebuilt.members_complete {
+    if rebuilt.found.custody.members_complete() {
         println!("custody members: parsed from spend");
     } else {
         println!("custody members: hash only (M-of-N or unparsed); enough for delayed recovery");
@@ -379,18 +376,11 @@ fn print_reconstructed(
     Ok(())
 }
 
-fn print_fallback(
-    network: Network,
-    launcher_id: Option<Bytes32>,
-    launcher_source: Option<&str>,
-    gap: chia_vault_recover::LookupGap,
-) {
+fn print_fallback(network: Network, gap: &chia_vault_recover::LookupGap) {
     println!("network: {}", network.as_str());
-    if let Some(id) = launcher_id {
-        println!("launcher_id: 0x{}", hex::encode(id));
-    }
-    if let Some(source) = launcher_source {
-        println!("resolved_from: {source}");
+    if let Some(launcher) = gap.known_launcher() {
+        println!("launcher_id: 0x{}", hex::encode(launcher.id));
+        println!("resolved_from: {}", launcher.source);
     }
     println!("{}", fallback_guidance(gap));
 }

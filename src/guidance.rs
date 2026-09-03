@@ -1,52 +1,68 @@
 //! End-user guidance for the address-first lookup flow.
 
+use chia_protocol::Bytes32;
+
+/// Launcher known from a successful resolve (not from the address alone).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KnownLauncher {
+    pub id: Bytes32,
+    pub source: String,
+}
+
 /// Why chain lookup could not rebuild the vault layout.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LookupGap {
     /// Address unused, never spent, or parent spends did not reveal a launcher.
     LauncherNotFound,
     /// Launcher is known but the singleton has never been spent (eve only).
-    SingletonNeverSpent,
+    SingletonNeverSpent(KnownLauncher),
     /// Singleton spends exist but none used the current custody path.
-    NoCustodySpend,
+    NoCustodySpend(KnownLauncher),
 }
 
 impl LookupGap {
-    pub fn headline(self) -> &'static str {
+    pub fn headline(&self) -> &'static str {
         match self {
             Self::LauncherNotFound => {
                 "Could not find this vault’s launcher id from the address alone."
             }
-            Self::SingletonNeverSpent => {
+            Self::SingletonNeverSpent(_) => {
                 "Found the launcher, but this vault has never been spent with the current setup."
             }
-            Self::NoCustodySpend => {
+            Self::NoCustodySpend(_) => {
                 "Found the launcher, but no previous custody spend is on chain."
             }
         }
     }
 
-    pub fn detail(self) -> &'static str {
+    pub fn detail(&self) -> &'static str {
         match self {
             Self::LauncherNotFound => {
                 "A Cloud Wallet receive address does not contain the launcher id. \
                  The tool can only recover it from a spent coin at that address \
                  (or from a parent vault spend)."
             }
-            Self::SingletonNeverSpent => {
+            Self::SingletonNeverSpent(_) => {
                 "An unspent eve singleton does not reveal the custody path. \
                  You need one send from the vault, or a vault-config JSON."
             }
-            Self::NoCustodySpend => {
+            Self::NoCustodySpend(_) => {
                 "Recovery-only spends are not enough. A send that uses the vault’s \
                  passkey (custody) publishes the layout this tool needs."
             }
         }
     }
+
+    pub fn known_launcher(&self) -> Option<&KnownLauncher> {
+        match self {
+            Self::LauncherNotFound => None,
+            Self::SingletonNeverSpent(launcher) | Self::NoCustodySpend(launcher) => Some(launcher),
+        }
+    }
 }
 
 /// What to do when chain lookup cannot replace `vault-config-*.json`.
-pub fn fallback_guidance(gap: LookupGap) -> String {
+pub fn fallback_guidance(gap: &LookupGap) -> String {
     format!("{}\n{}\n\n{}", gap.headline(), gap.detail(), FALLBACK_STEPS)
 }
 
@@ -87,17 +103,35 @@ pub fn reconstruct_success_guidance(matches_current: bool) -> String {
 mod tests {
     use super::*;
 
+    fn launcher() -> KnownLauncher {
+        KnownLauncher {
+            id: Bytes32::new([0xaa; 32]),
+            source: "test".into(),
+        }
+    }
+
     #[test]
     fn fallback_mentions_self_send_and_script() {
         for gap in [
             LookupGap::LauncherNotFound,
-            LookupGap::SingletonNeverSpent,
-            LookupGap::NoCustodySpend,
+            LookupGap::SingletonNeverSpent(launcher()),
+            LookupGap::NoCustodySpend(launcher()),
         ] {
-            let text = fallback_guidance(gap);
+            let text = fallback_guidance(&gap);
             assert!(text.contains("self-send"), "{gap:?}");
             assert!(text.contains("download-vault-config.js"), "{gap:?}");
             assert!(text.contains("vault.chia.net"), "{gap:?}");
         }
+    }
+
+    #[test]
+    fn launcher_only_on_gaps_that_resolved_it() {
+        assert!(LookupGap::LauncherNotFound.known_launcher().is_none());
+        assert_eq!(
+            LookupGap::SingletonNeverSpent(launcher())
+                .known_launcher()
+                .map(|l| l.id),
+            Some(Bytes32::new([0xaa; 32]))
+        );
     }
 }

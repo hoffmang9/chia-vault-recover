@@ -19,7 +19,7 @@ pub use discover::{
     DiscoveredCustodyPath, FoundVault, ReconstructedVault, reconstruct, reconstruct_config,
 };
 pub use error::Error;
-pub use guidance::{LookupGap, fallback_guidance, reconstruct_success_guidance};
+pub use guidance::{KnownLauncher, LookupGap, fallback_guidance, reconstruct_success_guidance};
 pub use keys::{GeneratedMnemonic, KeyPair, MnemonicWordCount};
 pub use locate::{
     ResolvedLauncher, VaultLocator, client_for_vault, parse_vault_locator, resolve_launcher_id,
