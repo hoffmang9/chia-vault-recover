@@ -16,7 +16,22 @@ You also need network access (coinset by default, or a full node) to find the va
 
 ## Recover a vault
 
-### 1. Look up the address
+### GUI
+
+```bash
+chia-vault-recover-gui
+```
+
+1. Paste the vault Receive address and click **Look up vault**.
+2. If the layout is on chain, paste the recovery phrase and look up again (or paste the phrase first and look up once).
+3. If lookup asks for a self-send or a vault-config, follow the on-screen steps (same as the CLI notes below).
+4. Enter a new custody mnemonic, then **Start recovery**. After the clawback window, **Finish recovery**.
+
+`xch1…` / `txch1…` selects mainnet or testnet11 automatically.
+
+### CLI
+
+#### 1. Look up the address
 
 ```bash
 chia-vault-recover lookup --vault xch1...
@@ -42,13 +57,13 @@ chia-vault-recover lookup \
 
 You should see: *Vault layout rebuilt from chain. You do not need a vault-config-*.json download.*
 
-### 2. If lookup cannot rebuild the layout
+#### 2. If lookup cannot rebuild the layout
 
 The Receive address does **not** contain the launcher id. An unused vault, or a vault that has only ever received funds, has nothing on chain for this tool to parse.
 
 **If you can still open the vault at [vault.chia.net](https://vault.chia.net):**
 
-1. **Preferred — send any amount from the vault back to the same Receive address** (or any address you control). A self-send is enough. Cloud Wallet spends the vault singleton with your passkey, which publishes the launcher id and the custody path. Wait for that transaction to confirm, then run `lookup` on the same address again.
+1. **Preferred — send any amount from the vault back to the same Receive address** (or any address you control). A self-send is enough. Cloud Wallet spends the vault singleton with your passkey or the Chia Signer App, which publishes the launcher id and the custody path. Wait for that transaction to confirm, then run `lookup` on the same address again.
 2. **Or download the public vault-config JSON** without sending: while logged in, open DevTools → Console (macOS: Option-Command-J; Windows/Linux: Ctrl+Shift+J), paste [`scripts/download-vault-config.js`](scripts/download-vault-config.js), and press Enter. Then:
 
 ```bash
@@ -57,7 +72,7 @@ chia-vault-recover inspect --config vault-config-….json
 
 If you cannot access Cloud Wallet, you need a `vault-config-*.json` you saved earlier.
 
-### 3. Start delayed recovery
+#### 3. Start delayed recovery
 
 ```bash
 chia-vault-recover start \
@@ -67,11 +82,11 @@ chia-vault-recover start \
   --out-config post-recovery-vault-config.json
 ```
 
-`start --vault` looks up the vault first, then signs with the recovery phrase. The vault enters RECOVERY (the old passkey can still claw back during the window).
+`start --vault` looks up the vault first, then signs with the recovery phrase. The vault enters RECOVERY (the old passkey or Chia Signer App can still claw back during the window).
 
 Or pass `--config vault-config.json` if you already have a rebuilt or downloaded file.
 
-### 4. Wait, then finish
+#### 4. Wait, then finish
 
 Wait `clawbackTimelock` seconds (often 43200 / 12h):
 
@@ -82,19 +97,6 @@ chia-vault-recover finish \
 ```
 
 Default destination: new **24-word** BLS custody + an **auto-generated** second BLS recovery mnemonic (12-word option available). The generated recovery mnemonic is shown once (CLI print / GUI clipboard) and is **not** written into the public post-recovery config file.
-
-## GUI
-
-```bash
-chia-vault-recover-gui
-```
-
-1. Paste the vault Receive address and click **Look up vault**.
-2. If the layout is on chain, paste the recovery phrase and look up again (or paste the phrase first and look up once).
-3. If lookup asks for a self-send or a vault-config, follow the on-screen steps (same as above).
-4. Enter a new custody mnemonic, then **Start recovery**. After the clawback window, **Finish recovery**.
-
-`xch1…` / `txch1…` selects mainnet or testnet11 automatically.
 
 ## If lookup says you need a vault-config
 
@@ -214,11 +216,11 @@ Or point `--backend rpc --full-node-url https://localhost:8555` at a synced full
 
 ## Caveats
 
-- Instant recovery (spend/passkey key) is out of scope — use delayed recovery with the passphrase.
+- Instant recovery (spend/passkey or Chia Signer App key) is out of scope — use delayed recovery with the passphrase.
 - A never-spent Receive address cannot yield a launcher id. One Cloud Wallet send (including a self-send) is enough.
 - `lookup` also needs a previous **custody** spend of the current vault configuration. An unspent eve singleton, or a vault that has only ever been spent via recovery, cannot reveal the custody path. Cloud Wallet has not shipped on-chain config hints (`TEMP_VAULT_CONFIG_EXPORT` is still the JSON export/restore path).
-- Clawback during the window still requires the old custody passkey (not implemented here).
-- After finish, custody is on-chain BLS; Cloud Wallet’s product UI may not re-import that vault as a normal passkey vault.
+- Clawback during the window still requires the old custody passkey or Chia Signer App (not implemented here).
+- After finish, custody is on-chain BLS; Cloud Wallet’s product UI may not re-import that vault as a normal passkey or Chia Signer App vault.
 - p2-singleton XCH/CATs are unchanged; only the vault singleton’s custody hash changes.
 
 ## CI artifacts
