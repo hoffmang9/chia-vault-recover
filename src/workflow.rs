@@ -8,8 +8,11 @@ use clvm_utils::TreeHash;
 
 use crate::chain::ChainClient;
 use crate::config::VaultConfig;
+use crate::discover::{FoundVault, custody_from_vault_spend};
 use crate::error::{Error, Result};
+use crate::guidance::{KnownLauncher, LookupGap};
 use crate::keys::MnemonicWordCount;
+use crate::locate::{parse_vault_locator, resolve_launcher_id};
 use crate::network::Network;
 use crate::recovery::{
     FinishRecoveryParams, InspectReport, StartRecoveryParams, StartRecoveryResult, VaultPhase,
@@ -174,4 +177,137 @@ pub async fn finish(
         network,
     })?;
     client.push_tx(&bundle).await
+}
+
+/// Result of looking up a vault from its receive address (or launcher id).
+///
+/// This is chain facts only. Rebuild the public layout with
+/// [`crate::discover::reconstruct`].
+#[derive(Debug, Clone)]
+pub enum LookupReport {
+    Found(FoundVault),
+    NeedFallback(LookupGap),
+}
+
+/// Address-first lookup: resolve launcher and a prior custody spend.
+pub async fn lookup(client: &ChainClient, vault: &str) -> Result<LookupReport> {
+    let locator = parse_vault_locator(vault)?;
+    let Some(resolved) = resolve_launcher_id(client, &locator).await? else {
+        return Ok(LookupReport::NeedFallback(LookupGap::LauncherNotFound));
+    };
+
+    let (spent, current) = client.walk_singleton_chain(resolved.launcher_id).await?;
+
+    let mut custody = None;
+    for record in spent.iter().rev() {
+        let Some(spend) = client
+            .get_spend(record.coin.coin_id(), record.spent_block_index)
+            .await?
+        else {
+            continue;
+        };
+        if let Some(path) = custody_from_vault_spend(&spend)? {
+            custody = Some(path);
+            break;
+        }
+    }
+
+    Ok(classify_lookup(
+        resolved.launcher_id,
+        resolved.source,
+        current.coin,
+        spent.iter().map(|r| r.coin.puzzle_hash).collect(),
+        custody,
+    ))
+}
+
+pub(crate) fn classify_lookup(
+    launcher_id: chia_protocol::Bytes32,
+    launcher_source: String,
+    current_coin: chia_protocol::Coin,
+    ancestor_puzzle_hashes: Vec<chia_protocol::Bytes32>,
+    custody: Option<crate::discover::DiscoveredCustodyPath>,
+) -> LookupReport {
+    if ancestor_puzzle_hashes.is_empty() {
+        return LookupReport::NeedFallback(LookupGap::SingletonNeverSpent(KnownLauncher {
+            id: launcher_id,
+            source: launcher_source,
+        }));
+    }
+    match custody {
+        Some(custody) => LookupReport::Found(FoundVault {
+            launcher_id,
+            launcher_source,
+            custody,
+            current_coin,
+            ancestor_puzzle_hashes,
+        }),
+        None => LookupReport::NeedFallback(LookupGap::NoCustodySpend(KnownLauncher {
+            id: launcher_id,
+            source: launcher_source,
+        })),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use chia_protocol::{Bytes32, Coin};
+    use clvm_utils::TreeHash;
+
+    use super::*;
+    use crate::discover::DiscoveredCustodyPath;
+
+    fn coin() -> Coin {
+        Coin::new(Bytes32::new([0x01; 32]), Bytes32::new([0x02; 32]), 1)
+    }
+
+    fn custody() -> DiscoveredCustodyPath {
+        DiscoveredCustodyPath {
+            custody_hash: TreeHash::from(Bytes32::new([0x03; 32])),
+            members: vec![],
+            vault_launcher_ids: vec![],
+        }
+    }
+
+    #[test]
+    fn classify_empty_ancestors_is_never_spent() {
+        let launcher = Bytes32::new([0xaa; 32]);
+        match classify_lookup(launcher, "test".into(), coin(), vec![], Some(custody())) {
+            LookupReport::NeedFallback(LookupGap::SingletonNeverSpent(known)) => {
+                assert_eq!(known.id, launcher);
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_spent_without_custody_needs_fallback() {
+        match classify_lookup(
+            Bytes32::new([0xaa; 32]),
+            "test".into(),
+            coin(),
+            vec![Bytes32::new([0x04; 32])],
+            None,
+        ) {
+            LookupReport::NeedFallback(LookupGap::NoCustodySpend(_)) => {}
+            other => panic!("unexpected {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_custody_is_found() {
+        match classify_lookup(
+            Bytes32::new([0xaa; 32]),
+            "address xch1…".into(),
+            coin(),
+            vec![Bytes32::new([0x04; 32])],
+            Some(custody()),
+        ) {
+            LookupReport::Found(found) => {
+                assert_eq!(found.launcher_source, "address xch1…");
+                assert!(!found.custody.members_complete());
+            }
+            other => panic!("unexpected {other:?}"),
+        }
+    }
 }

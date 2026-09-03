@@ -34,6 +34,22 @@ pub struct SignerSet {
     pub threshold: usize,
 }
 
+/// Custody as either a full signer set or a hash-only path from a previous spend.
+#[derive(Debug, Clone)]
+pub enum CustodyPath {
+    Signers(SignerSet),
+    Hash(TreeHash),
+}
+
+impl CustodyPath {
+    pub fn hash(&self) -> Result<TreeHash> {
+        match self {
+            Self::Hash(hash) => Ok(*hash),
+            Self::Signers(set) => custody_member_hash(set),
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct RecoverySignerSet {
     pub set: SignerSet,
@@ -42,7 +58,7 @@ pub struct RecoverySignerSet {
 
 #[derive(Debug, Clone)]
 pub struct VaultKeys {
-    pub custody: SignerSet,
+    pub custody: CustodyPath,
     pub recovery: RecoverySignerSet,
 }
 
@@ -65,7 +81,7 @@ pub struct RecoveryStateHashes {
 }
 
 pub fn get_vault_internals(launcher_id: Bytes32, keys: &VaultKeys) -> Result<VaultInternals> {
-    let custody_hash = custody_member_hash(&keys.custody)?;
+    let custody_hash = keys.custody.hash()?;
     let (recovery_hash, recovery_restrictions) = ready_recovery_hash(custody_hash, &keys.recovery)?;
 
     let inner_puzzle_hash = top_level_hash(custody_hash, recovery_hash);
@@ -105,7 +121,7 @@ fn recovery_state_from_finish_hash(
     keys: &VaultKeys,
     finish_delegated_puzzle_hash: TreeHash,
 ) -> Result<RecoveryStateHashes> {
-    let custody_hash = custody_member_hash(&keys.custody)?;
+    let custody_hash = keys.custody.hash()?;
     let timelock = keys.recovery.clawback_timelock;
     let timelock_restriction = Restriction {
         kind: RestrictionKind::MemberCondition,

@@ -351,11 +351,11 @@ mod key_match_tests {
         )
         .unwrap();
         let keys = VaultKeys {
-            custody: SignerSet {
+            custody: crate::vault::CustodyPath::Signers(SignerSet {
                 keys: vec![VaultMemberKey::Bls(right.public_key)],
                 vault_launcher_ids: vec![],
                 threshold: 1,
-            },
+            }),
             recovery: RecoverySignerSet {
                 set: SignerSet {
                     keys: vec![VaultMemberKey::Bls(right.public_key)],

@@ -8,7 +8,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::error::{Error, Result};
 use crate::keys::{KeyPair, parse_bls_public_key, parse_hex_bytes, public_key_to_hex};
-use crate::vault::{VaultKeys, VaultMemberKey};
+use crate::vault::{CustodyPath, VaultKeys, VaultMemberKey};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
@@ -53,7 +53,11 @@ pub enum VaultConfigMember {
 #[serde(rename_all = "camelCase")]
 pub struct VaultConfigSide {
     pub threshold: u32,
+    #[serde(default)]
     pub members: Vec<VaultConfigMember>,
+    /// MIPS custody-path hash. Required when `members` is empty (on-chain discovery).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hash: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -90,7 +94,7 @@ impl VaultConfig {
 
     pub fn to_vault_keys(&self) -> Result<VaultKeys> {
         Ok(VaultKeys {
-            custody: side_to_signers(&self.custody)?,
+            custody: side_to_custody(&self.custody)?,
             recovery: recovery_to_signers(&self.recovery)?,
         })
     }
@@ -112,6 +116,7 @@ impl VaultConfig {
                     curve: Curve::Bls12_381,
                     key_type: Some(KeyType::RecoveryPhrase),
                 }],
+                hash: None,
             },
             recovery: VaultConfigRecovery {
                 threshold: 1,
@@ -149,11 +154,19 @@ fn side_to_signers(side: &VaultConfigSide) -> Result<crate::vault::SignerSet> {
     })
 }
 
+fn side_to_custody(side: &VaultConfigSide) -> Result<CustodyPath> {
+    if let Some(hash) = &side.hash {
+        return Ok(CustodyPath::Hash(parse_bytes32(hash)?.into()));
+    }
+    Ok(CustodyPath::Signers(side_to_signers(side)?))
+}
+
 fn recovery_to_signers(side: &VaultConfigRecovery) -> Result<crate::vault::RecoverySignerSet> {
     Ok(crate::vault::RecoverySignerSet {
         set: side_to_signers(&VaultConfigSide {
             threshold: side.threshold,
             members: side.members.clone(),
+            hash: None,
         })?,
         clawback_timelock: side.clawback_timelock,
     })
