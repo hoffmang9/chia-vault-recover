@@ -5,15 +5,13 @@ use std::sync::OnceLock;
 
 use chia_vault_recover::chain::ChainClient;
 use chia_vault_recover::config::VaultConfig;
-use chia_vault_recover::discover::{FoundVault, reconstruct};
-use chia_vault_recover::guidance::{
-    LOOKUP_READY_FOR_PHRASE, fallback_guidance, reconstruct_success_guidance,
-};
+use chia_vault_recover::discover::FoundVault;
+use chia_vault_recover::guidance::{CLAWBACK_SECS_HELP, LOOKUP_CAN_RECOVER, fallback_guidance};
 use chia_vault_recover::keys::MnemonicWordCount;
 use chia_vault_recover::locate::client_for_vault;
 use chia_vault_recover::network::{Backend, Network};
 use chia_vault_recover::recovery::VaultPhase;
-use chia_vault_recover::workflow::{self, LookupReport, StartWorkflow};
+use chia_vault_recover::workflow::{self, LookupReport, StartFromFound, StartWorkflow};
 use eframe::egui;
 
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -40,8 +38,8 @@ fn main() -> eframe::Result<()> {
     )
 }
 
-const INTRO_GUIDANCE: &str =
-    "Enter the vault Receive address (xch1… / txch1…) from Cloud Wallet, then click Look up vault.";
+const INTRO_GUIDANCE: &str = "Enter the vault Receive address (xch1… / txch1…) from Cloud Wallet, then click Look up vault. \
+     This check does not need the recovery phrase.";
 const LOADED_CONFIG_GUIDANCE: &str =
     "Using a downloaded vault-config JSON. Inspect, then Start recovery.";
 const AFTER_START_GUIDANCE: &str =
@@ -49,19 +47,10 @@ const AFTER_START_GUIDANCE: &str =
 
 enum AppStep {
     NeedLookup,
-    Found {
-        vault_input: String,
-        found: FoundVault,
-    },
+    Found { found: FoundVault },
     NeedFallback(chia_vault_recover::LookupGap),
-    ReadyFromLookup {
-        vault_input: String,
-        found: FoundVault,
-        next: String,
-    },
-    ReadyFromFile {
-        next: String,
-    },
+    ReadyFromLookup { found: FoundVault, next: String },
+    ReadyFromFile { next: String },
 }
 
 struct App {
@@ -132,7 +121,14 @@ impl App {
         }
     }
 
-    fn layout_ready(&self) -> bool {
+    fn can_start(&self) -> bool {
+        matches!(
+            self.step,
+            AppStep::Found { .. } | AppStep::ReadyFromLookup { .. } | AppStep::ReadyFromFile { .. }
+        )
+    }
+
+    fn can_inspect(&self) -> bool {
         matches!(
             self.step,
             AppStep::ReadyFromLookup { .. } | AppStep::ReadyFromFile { .. }
@@ -142,7 +138,7 @@ impl App {
     fn guidance(&self) -> String {
         match &self.step {
             AppStep::NeedLookup => INTRO_GUIDANCE.to_string(),
-            AppStep::Found { .. } => LOOKUP_READY_FOR_PHRASE.to_string(),
+            AppStep::Found { .. } => LOOKUP_CAN_RECOVER.to_string(),
             AppStep::NeedFallback(gap) => fallback_guidance(gap),
             AppStep::ReadyFromLookup { next, .. } | AppStep::ReadyFromFile { next } => next.clone(),
         }
@@ -157,14 +153,9 @@ impl App {
         }
     }
 
-    fn cached_found(&self, vault: &str) -> Option<&FoundVault> {
+    fn cached_found(&self) -> Option<&FoundVault> {
         match &self.step {
-            AppStep::Found {
-                vault_input, found, ..
-            }
-            | AppStep::ReadyFromLookup {
-                vault_input, found, ..
-            } if vault_input == vault => Some(found),
+            AppStep::Found { found, .. } | AppStep::ReadyFromLookup { found, .. } => Some(found),
             _ => None,
         }
     }
@@ -175,10 +166,10 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Chia Vault Recover");
-                ui.label("Start with the bech32m Receive address. The tool looks up the launcher and tells you if a vault-config JSON is needed.");
+                ui.label("Look up the Receive address first to confirm this vault can be recovered. The recovery phrase is only needed when you Start recovery.");
                 ui.separator();
 
-                ui.strong("1. Vault address");
+                ui.strong("1. Look up vault");
                 ui.horizontal(|ui| {
                     ui.label("Receive address (xch1… / txch1…):");
                     ui.add(
@@ -192,25 +183,9 @@ impl eframe::App for App {
                     ui.label("Full node URL (optional; empty = coinset):");
                     ui.text_edit_singleline(&mut self.full_node_url);
                 });
-                ui.horizontal(|ui| {
-                    if ui.button("Look up vault").clicked() {
-                        self.run_lookup();
-                    }
-                    ui.label("Uses the recovery phrase below if you have already pasted it.");
-                });
-
-                ui.add_space(8.0);
-                ui.strong("2. Recovery phrase");
-                ui.label("Cloud Wallet recovery passphrase. Needed to rebuild the public layout and to start delayed recovery.");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.recovery_mnemonic)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Clawback seconds (optional; empty = try defaults):");
-                    ui.text_edit_singleline(&mut self.clawback_secs);
-                });
+                if ui.button("Look up vault").clicked() {
+                    self.run_lookup();
+                }
 
                 ui.add_space(8.0);
                 ui.collapsing("Already have a vault-config JSON?", |ui| {
@@ -233,48 +208,64 @@ impl eframe::App for App {
                 });
 
                 ui.add_space(8.0);
-                ui.strong("3. New keys and delayed recovery");
-                ui.label("New custody mnemonic (required to start):");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.new_custody_mnemonic)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.label("New recovery mnemonic (optional — leave empty to auto-generate):");
-                ui.add(
-                    egui::TextEdit::multiline(&mut self.new_recovery_mnemonic)
-                        .desired_rows(2)
-                        .desired_width(f32::INFINITY),
-                );
-                ui.checkbox(
-                    &mut self.generate_12_words,
-                    "Generate 12-word mnemonics (default 24)",
-                );
-                ui.horizontal(|ui| {
-                    ui.label("Post-recovery config:");
-                    ui.text_edit_singleline(&mut self.post_recovery_path);
-                    if ui.button("Browse…").clicked()
-                        && let Some(path) = rfd::FileDialog::new().pick_file()
-                    {
-                        self.post_recovery_path = path.display().to_string();
-                    }
-                });
+                ui.strong("2. Start recovery");
+                if self.can_start() {
+                    ui.label("Cloud Wallet recovery passphrase (only needed to start delayed recovery):");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.recovery_mnemonic)
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.label(CLAWBACK_SECS_HELP);
+                    ui.horizontal(|ui| {
+                        ui.label("Clawback seconds (optional):");
+                        ui.add(
+                            egui::TextEdit::singleline(&mut self.clawback_secs)
+                                .desired_width(120.0)
+                                .hint_text("e.g. 43200"),
+                        );
+                    });
+                    ui.label("New custody mnemonic (required to start):");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.new_custody_mnemonic)
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.label("New recovery mnemonic (optional — leave empty to auto-generate):");
+                    ui.add(
+                        egui::TextEdit::multiline(&mut self.new_recovery_mnemonic)
+                            .desired_rows(2)
+                            .desired_width(f32::INFINITY),
+                    );
+                    ui.checkbox(
+                        &mut self.generate_12_words,
+                        "Generate 12-word mnemonics (default 24)",
+                    );
+                    ui.horizontal(|ui| {
+                        ui.label("Post-recovery config:");
+                        ui.text_edit_singleline(&mut self.post_recovery_path);
+                        if ui.button("Browse…").clicked()
+                            && let Some(path) = rfd::FileDialog::new().pick_file()
+                        {
+                            self.post_recovery_path = path.display().to_string();
+                        }
+                    });
+                } else {
+                    ui.label("Look up the vault first (or load a vault-config JSON). The recovery phrase is only asked for when you start.");
+                }
 
                 ui.separator();
                 ui.horizontal(|ui| {
-                    if ui.add_enabled(self.layout_ready(), egui::Button::new("Inspect")).clicked() {
+                    if ui.add_enabled(self.can_inspect(), egui::Button::new("Inspect")).clicked() {
                         self.run_inspect();
                     }
-                    if ui.add_enabled(self.layout_ready(), egui::Button::new("Start recovery")).clicked() {
+                    if ui.add_enabled(self.can_start(), egui::Button::new("Start recovery")).clicked() {
                         self.run_start();
                     }
                     if ui.button("Finish recovery").clicked() {
                         self.run_finish();
                     }
                 });
-                if !self.layout_ready() {
-                    ui.label("Look up the vault (or load a vault-config JSON) before Inspect / Start.");
-                }
 
                 if let Some(words) = &self.generated_recovery_mnemonic {
                     ui.separator();
@@ -317,44 +308,14 @@ impl App {
         }
     }
 
-    fn apply_reconstructed(
-        &mut self,
-        rebuilt: chia_vault_recover::ReconstructedVault,
-        network: Network,
-    ) -> chia_vault_recover::error::Result<()> {
-        self.network_mainnet = matches!(network, Network::Mainnet);
-        let out = if self.config_path.is_empty() {
-            PathBuf::from("vault-config.json")
-        } else {
-            PathBuf::from(&self.config_path)
-        };
-        rebuilt.config.save(&out)?;
-        self.config_path = out.display().to_string();
-        self.status = format!(
-            "Looked up launcher 0x{} ({}). Wrote {}. You do not need a vault-config download.",
-            hex::encode(rebuilt.config.launcher_id_bytes()?),
-            rebuilt.found.launcher_source,
-            out.display()
-        );
-        self.step = AppStep::ReadyFromLookup {
-            vault_input: self.vault_address.trim().to_string(),
-            found: rebuilt.found,
-            next: reconstruct_success_guidance(rebuilt.matches_current),
-        };
-        Ok(())
-    }
-
     fn apply_found(&mut self, found: FoundVault, network: Network) {
         self.network_mainnet = matches!(network, Network::Mainnet);
         self.status = format!(
-            "Launcher 0x{} from {}. Paste the recovery phrase and Look up vault again.",
+            "Launcher 0x{} from {}. This vault can be recovered. Enter the recovery phrase only when you Start recovery.",
             hex::encode(found.launcher_id),
             found.launcher_source
         );
-        self.step = AppStep::Found {
-            vault_input: self.vault_address.trim().to_string(),
-            found,
-        };
+        self.step = AppStep::Found { found };
     }
 
     fn apply_fallback(&mut self, gap: chia_vault_recover::LookupGap, network: Network) {
@@ -378,35 +339,11 @@ impl App {
                     "enter the vault Receive address (xch1… / txch1…) first",
                 ));
             }
-            let mnemonic = {
-                let trimmed = self.recovery_mnemonic.trim();
-                if trimmed.is_empty() {
-                    None
-                } else {
-                    Some(trimmed)
-                }
-            };
-            if let (Some(found), Some(mnemonic)) = (self.cached_found(vault).cloned(), mnemonic) {
-                let (_, network) = self.chain_client()?;
-                let rebuilt = reconstruct(&found, mnemonic, self.clawback()?)?;
-                self.apply_reconstructed(rebuilt, network)?;
-                return Ok(());
-            }
-
             let (client, network) = client_for_vault(vault, self.network(), &self.backend())?;
             let report = runtime().block_on(workflow::lookup(&client, vault))?;
             match report {
-                LookupReport::Found(found) => {
-                    if let Some(mnemonic) = mnemonic {
-                        let rebuilt = reconstruct(&found, mnemonic, self.clawback()?)?;
-                        self.apply_reconstructed(rebuilt, network)?;
-                    } else {
-                        self.apply_found(found, network);
-                    }
-                }
-                LookupReport::NeedFallback(gap) => {
-                    self.apply_fallback(gap, network);
-                }
+                LookupReport::Found(found) => self.apply_found(found, network),
+                LookupReport::NeedFallback(gap) => self.apply_fallback(gap, network),
             }
             Ok::<(), chia_vault_recover::Error>(())
         })();
@@ -456,11 +393,25 @@ impl App {
 
     fn run_start(&mut self) {
         let result = (|| {
-            let config = VaultConfig::load(&self.config_path)?;
+            if self.recovery_mnemonic.trim().is_empty() {
+                return Err(chia_vault_recover::Error::msg(
+                    "enter the Cloud Wallet recovery phrase to start recovery",
+                ));
+            }
+            if self.new_custody_mnemonic.trim().is_empty() {
+                return Err(chia_vault_recover::Error::msg(
+                    "enter a new custody mnemonic to start recovery",
+                ));
+            }
             let out = if self.post_recovery_path.is_empty() {
                 PathBuf::from("post-recovery-vault-config.json")
             } else {
                 PathBuf::from(&self.post_recovery_path)
+            };
+            let lookup_out = if self.config_path.is_empty() {
+                PathBuf::from("vault-config.json")
+            } else {
+                PathBuf::from(&self.config_path)
             };
             let word_count = if self.generate_12_words {
                 MnemonicWordCount::Words12
@@ -476,19 +427,44 @@ impl App {
                 }
             };
             let (client, network) = self.chain_client()?;
-            let start = runtime().block_on(workflow::start(
-                &client,
-                StartWorkflow {
-                    config: &config,
-                    recovery_mnemonic: self.recovery_mnemonic.trim(),
-                    new_custody_mnemonic: self.new_custody_mnemonic.trim(),
-                    new_recovery_mnemonic: new_recovery,
-                    new_clawback_timelock: None,
-                    new_word_count: word_count,
-                    network,
-                    out_config: &out,
-                },
-            ))?;
+            let start = if let Some(found) = self.cached_found().cloned() {
+                let (rebuilt, start) = runtime().block_on(workflow::start_from_found(
+                    &client,
+                    StartFromFound {
+                        found: &found,
+                        recovery_mnemonic: self.recovery_mnemonic.trim(),
+                        new_custody_mnemonic: self.new_custody_mnemonic.trim(),
+                        new_recovery_mnemonic: new_recovery,
+                        clawback_secs: self.clawback()?,
+                        new_clawback_timelock: None,
+                        new_word_count: word_count,
+                        network,
+                        out_config: &out,
+                        lookup_config: &lookup_out,
+                    },
+                ))?;
+                self.config_path = lookup_out.display().to_string();
+                self.step = AppStep::ReadyFromLookup {
+                    found: rebuilt.found,
+                    next: AFTER_START_GUIDANCE.to_string(),
+                };
+                start
+            } else {
+                let config = VaultConfig::load(&self.config_path)?;
+                runtime().block_on(workflow::start(
+                    &client,
+                    StartWorkflow {
+                        config: &config,
+                        recovery_mnemonic: self.recovery_mnemonic.trim(),
+                        new_custody_mnemonic: self.new_custody_mnemonic.trim(),
+                        new_recovery_mnemonic: new_recovery,
+                        new_clawback_timelock: None,
+                        new_word_count: word_count,
+                        network,
+                        out_config: &out,
+                    },
+                ))?
+            };
             self.post_recovery_path = out.display().to_string();
             self.generated_recovery_mnemonic = start.generated_recovery_mnemonic.clone();
             self.status = format!(

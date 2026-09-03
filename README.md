@@ -6,9 +6,9 @@ Licensed under the [Apache License 2.0](LICENSE).
 
 ## What you need
 
-1. **The vault Receive address** — the bech32m `xch1…` or `txch1…` address shown in Cloud Wallet. Start here. The tool looks up the launcher and checks whether the public vault layout is already on chain.
-2. **Recovery passphrase** — the 24-word phrase Cloud Wallet gave you for vault recovery (signs delayed recovery).
-3. **A new custody mnemonic** — 24 words by default (12 optional); this becomes the post-recovery spend key. The tool can auto-generate a second mnemonic for the new recovery branch.
+1. **The vault Receive address** — the bech32m `xch1…` or `txch1…` address shown in Cloud Wallet. Start here. The first run only looks up the launcher and checks whether a prior custody spend is on chain. You do **not** enter the recovery phrase for this check.
+2. **Recovery passphrase** — the 24-word phrase Cloud Wallet gave you for vault recovery. Needed only when you **Start recovery** (to rebuild the public layout and to sign).
+3. **A new custody mnemonic** — 24 words by default (12 optional); this becomes the post-recovery spend key. The tool can auto-generate a second mnemonic for the new recovery branch. Also only needed when you start.
 
 You also need network access (coinset by default, or a full node) to find the vault singleton and broadcast transactions.
 
@@ -22,10 +22,10 @@ You also need network access (coinset by default, or a full node) to find the va
 chia-vault-recover-gui
 ```
 
-1. Paste the vault Receive address and click **Look up vault**.
-2. If the layout is on chain, paste the recovery phrase and look up again (or paste the phrase first and look up once).
-3. If lookup asks for a self-send or a vault-config, follow the on-screen steps (same as the CLI notes below).
-4. Enter a new custody mnemonic, then **Start recovery**. After the clawback window, **Finish recovery**.
+1. Paste the vault Receive address and click **Look up vault**. This does not ask for the recovery phrase. If the vault can be recovered, you can close the app and come back later.
+2. If lookup asks for a self-send or a vault-config, follow the on-screen steps (same as the CLI notes below).
+3. When you are ready to start, paste the recovery phrase and a new custody mnemonic, then **Start recovery**. If you know the clawback window in seconds, enter it; otherwise leave it empty and the app tries common Cloud Wallet values (including 43200 / 12 hours) until the spend matches the chain.
+4. After the clawback window, **Finish recovery**.
 
 `xch1…` / `txch1…` selects mainnet or testnet11 automatically.
 
@@ -44,20 +44,11 @@ The tool:
 1. Decodes the Receive address
 2. Finds the vault launcher id from spent coins at that address (or their parents)
 3. Walks the vault singleton and looks for a previous **custody** spend
-4. Tells you whether a vault-config JSON is required
+4. Tells you whether this vault can be recovered later, or whether a vault-config JSON is required
 
-If the layout is already on chain, look up again with the recovery phrase to write a local public config (keys and timelock only — not the phrase):
+You should see: *This vault can be recovered.* The recovery phrase is not needed until `start`.
 
-```bash
-chia-vault-recover lookup \
-  --vault xch1... \
-  --recovery-mnemonic-file recovery.txt \
-  --out-config vault-config.json
-```
-
-You should see: *Vault layout rebuilt from chain. You do not need a vault-config-*.json download.*
-
-#### 2. If lookup cannot rebuild the layout
+#### 2. If lookup cannot find a custody spend
 
 The Receive address does **not** contain the launcher id. An unused vault, or a vault that has only ever received funds, has nothing on chain for this tool to parse.
 
@@ -82,9 +73,9 @@ chia-vault-recover start \
   --out-config post-recovery-vault-config.json
 ```
 
-`start --vault` looks up the vault first, then signs with the recovery phrase. The vault enters RECOVERY (the old passkey or Chia Signer App can still claw back during the window).
+`start --vault` looks up the vault, rebuilds the public layout from the recovery phrase, then signs. If you know the current clawback window, pass `--clawback-secs` (for example `43200`). If you omit it, common Cloud Wallet values are tried until the reconstructed spend matches the chain. The vault enters RECOVERY (the old passkey or Chia Signer App can still claw back during the window).
 
-Or pass `--config vault-config.json` if you already have a rebuilt or downloaded file.
+Or pass `--config vault-config.json` if you already have a downloaded file (that file already includes the timelock).
 
 #### 4. Wait, then finish
 
@@ -130,18 +121,19 @@ cargo build --release
 ## CLI reference
 
 ```bash
-# Start here: address only (do I need a vault-config?)
+# First run: address only (can this vault be recovered later?)
 chia-vault-recover lookup --vault xch1...
 
-# Rebuild public layout from chain (no JSON download)
-chia-vault-recover lookup \
-  --vault xch1... \
-  --recovery-mnemonic-file recovery.txt \
-  --out-config vault-config.json
-
-# Look up + start in one step
+# Later: start delayed recovery (phrase required here)
 chia-vault-recover start \
   --vault xch1... \
+  --recovery-mnemonic-file recovery.txt \
+  --new-custody-mnemonic-file new-custody.txt
+
+# Optional: pass the current clawback window if you know it
+chia-vault-recover start \
+  --vault xch1... \
+  --clawback-secs 43200 \
   --recovery-mnemonic-file recovery.txt \
   --new-custody-mnemonic-file new-custody.txt
 
@@ -164,7 +156,7 @@ Useful flags:
 | `--network mainnet\|testnet11` | Used when the input is a hex launcher id. Addresses pick the network from `xch` / `txch` |
 | `--backend coinset\|rpc` | Default **coinset**; with `rpc` set `--full-node-url` |
 | `--word-count 12\|24` | Length for auto-generated recovery mnemonic (default 24) |
-| `--clawback-secs` | `lookup` / `start --vault`; if omitted, common values (including 43200) are tried |
+| `--clawback-secs` | `start --vault` only. Current vault window in seconds. If omitted, common Cloud Wallet values (including 43200 / 12h) are tried until the spend matches the chain |
 
 Fees are not supported yet (zero-fee spends only).
 
@@ -174,8 +166,8 @@ Mnemonics may also be passed via env: `CHIA_VAULT_RECOVERY_MNEMONIC`, `CHIA_VAUL
 
 Cloud Wallet vaults are MIPS 1-of-2 singletons (custody | recovery). This tool runs **delayed (timelocked) recovery**:
 
-1. **lookup** — address → launcher → optional rebuilt public layout
-2. **start** — sign with the recovery phrase; vault enters RECOVERY
+1. **lookup** — address → launcher → prior custody spend (no recovery phrase)
+2. **start** — recovery phrase (+ optional `--clawback-secs`, else try common values) → rebuild public layout and sign; vault enters RECOVERY
 3. wait for `clawbackTimelock` seconds
 4. **finish** — permissionless rekey to the new custody configuration
 
@@ -203,7 +195,7 @@ cargo test --all
 4. Run:
 
 ```bash
-chia-vault-recover lookup --vault txch1... --recovery-mnemonic-file recovery.txt
+chia-vault-recover lookup --vault txch1...
 chia-vault-recover start --vault txch1... --network testnet11 \
   --recovery-mnemonic-file recovery.txt \
   --new-custody-mnemonic-file new-custody.txt

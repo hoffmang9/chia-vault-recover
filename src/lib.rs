@@ -19,7 +19,10 @@ pub use discover::{
     DiscoveredCustodyPath, FoundVault, ReconstructedVault, reconstruct, reconstruct_config,
 };
 pub use error::Error;
-pub use guidance::{KnownLauncher, LookupGap, fallback_guidance, reconstruct_success_guidance};
+pub use guidance::{
+    CLAWBACK_SECS_HELP, KnownLauncher, LOOKUP_CAN_RECOVER, LookupGap, fallback_guidance,
+    reconstruct_success_guidance,
+};
 pub use keys::{GeneratedMnemonic, KeyPair, MnemonicWordCount};
 pub use locate::{
     ResolvedLauncher, VaultLocator, client_for_vault, parse_vault_locator, resolve_launcher_id,
@@ -31,6 +34,7 @@ pub use recovery::{
 };
 pub use vault::{CustodyPath, VaultInternals, VaultKeys, VaultMemberKey};
 pub use workflow::{
-    LookupReport, StartWorkflow, finish as finish_workflow, inspect as inspect_workflow,
-    lookup as lookup_workflow, start as start_workflow,
+    LookupReport, StartFromFound, StartWorkflow, finish as finish_workflow,
+    inspect as inspect_workflow, lookup as lookup_workflow, start as start_workflow,
+    start_from_found,
 };

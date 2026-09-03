@@ -8,7 +8,7 @@ use clvm_utils::TreeHash;
 
 use crate::chain::ChainClient;
 use crate::config::VaultConfig;
-use crate::discover::{FoundVault, custody_from_vault_spend};
+use crate::discover::{FoundVault, ReconstructedVault, custody_from_vault_spend, reconstruct};
 use crate::error::{Error, Result};
 use crate::guidance::{KnownLauncher, LookupGap};
 use crate::keys::MnemonicWordCount;
@@ -156,6 +156,47 @@ pub async fn start(client: &ChainClient, params: StartWorkflow<'_>) -> Result<St
     Ok(result)
 }
 
+/// Reconstruct the public layout from a prior lookup, then start delayed recovery.
+///
+/// `clawback_secs` is the **current** vault window. Omit it to try common Cloud
+/// Wallet values until the puzzle hash matches. The recovery phrase is required
+/// here (to derive the recovery key and to sign) and not at lookup.
+pub struct StartFromFound<'a> {
+    pub found: &'a FoundVault,
+    pub recovery_mnemonic: &'a str,
+    pub new_custody_mnemonic: &'a str,
+    pub new_recovery_mnemonic: Option<&'a str>,
+    pub clawback_secs: Option<u64>,
+    pub new_clawback_timelock: Option<u64>,
+    pub new_word_count: MnemonicWordCount,
+    pub network: Network,
+    pub out_config: &'a Path,
+    pub lookup_config: &'a Path,
+}
+
+pub async fn start_from_found(
+    client: &ChainClient,
+    params: StartFromFound<'_>,
+) -> Result<(ReconstructedVault, StartRecoveryResult)> {
+    let rebuilt = reconstruct(params.found, params.recovery_mnemonic, params.clawback_secs)?;
+    rebuilt.config.save(params.lookup_config)?;
+    let result = start(
+        client,
+        StartWorkflow {
+            config: &rebuilt.config,
+            recovery_mnemonic: params.recovery_mnemonic,
+            new_custody_mnemonic: params.new_custody_mnemonic,
+            new_recovery_mnemonic: params.new_recovery_mnemonic,
+            new_clawback_timelock: params.new_clawback_timelock,
+            new_word_count: params.new_word_count,
+            network: params.network,
+            out_config: params.out_config,
+        },
+    )
+    .await?;
+    Ok((rebuilt, result))
+}
+
 pub async fn finish(
     client: &ChainClient,
     config: &VaultConfig,
@@ -181,8 +222,8 @@ pub async fn finish(
 
 /// Result of looking up a vault from its receive address (or launcher id).
 ///
-/// This is chain facts only. Rebuild the public layout with
-/// [`crate::discover::reconstruct`].
+/// This is chain facts only. Rebuild the public layout at Start with
+/// [`crate::discover::reconstruct`] (via [`start_from_found`]).
 #[derive(Debug, Clone)]
 pub enum LookupReport {
     Found(FoundVault),

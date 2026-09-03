@@ -3,15 +3,15 @@ use std::path::PathBuf;
 use anyhow::{Context, Result, bail};
 use chia_vault_recover::chain::ChainClient;
 use chia_vault_recover::config::VaultConfig;
-use chia_vault_recover::discover::{FoundVault, ReconstructedVault, reconstruct};
+use chia_vault_recover::discover::{FoundVault, ReconstructedVault};
 use chia_vault_recover::guidance::{
-    LOOKUP_READY_FOR_PHRASE, fallback_guidance, reconstruct_success_guidance,
+    LOOKUP_CAN_RECOVER, fallback_guidance, reconstruct_success_guidance,
 };
 use chia_vault_recover::keys::MnemonicWordCount;
 use chia_vault_recover::locate::client_for_vault;
 use chia_vault_recover::network::{Backend, Network};
-use chia_vault_recover::recovery::VaultPhase;
-use chia_vault_recover::workflow::{self, LookupReport, StartWorkflow};
+use chia_vault_recover::recovery::{StartRecoveryResult, VaultPhase};
+use chia_vault_recover::workflow::{self, LookupReport, StartFromFound, StartWorkflow};
 use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Parser, Debug)]
@@ -33,19 +33,10 @@ enum Commands {
         /// Vault Receive address (`xch1…` / `txch1…`). A hex launcher id also works.
         #[arg(long, alias = "address", alias = "launcher-id")]
         vault: String,
-        #[arg(long, env = "CHIA_VAULT_RECOVERY_MNEMONIC")]
-        recovery_mnemonic: Option<String>,
-        #[arg(long)]
-        recovery_mnemonic_file: Option<PathBuf>,
-        /// Clawback timelock in seconds. If omitted, common Cloud Wallet values are tried.
-        #[arg(long)]
-        clawback_secs: Option<u64>,
         #[arg(long, default_value = "mainnet")]
         network: NetworkArg,
         #[command(flatten)]
         backend: BackendArgs,
-        #[arg(long, default_value = "vault-config.json")]
-        out_config: PathBuf,
     },
     /// Start delayed recovery (signs with the Cloud Wallet recovery phrase)
     Start {
@@ -70,6 +61,9 @@ enum Commands {
         word_count: u8,
         #[arg(long)]
         new_clawback_secs: Option<u64>,
+        /// Current vault clawback window in seconds. If you know it, pass it.
+        /// If omitted, common Cloud Wallet values (including 43200 / 12h) are
+        /// tried until the reconstructed spend matches the chain.
         #[arg(long)]
         clawback_secs: Option<u64>,
         #[arg(long, default_value = "mainnet")]
@@ -154,30 +148,19 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Lookup {
             vault,
-            recovery_mnemonic,
-            recovery_mnemonic_file,
-            clawback_secs,
             network,
             backend,
-            out_config,
         } => {
             let (client, network) = client_for(&vault, network, backend)?;
             let report = workflow::lookup(&client, &vault).await?;
             match report {
                 LookupReport::Found(found) => {
-                    if let Some(mnemonic) =
-                        optional_mnemonic(recovery_mnemonic, recovery_mnemonic_file)?
-                    {
-                        let rebuilt = reconstruct(&found, &mnemonic, clawback_secs)?;
-                        rebuilt.config.save(&out_config)?;
-                        print_reconstructed(&rebuilt, network, Some(&out_config))?;
-                    } else {
-                        print_found(&found, network);
-                        println!("{LOOKUP_READY_FOR_PHRASE}");
-                        println!(
-                            "Re-run lookup with --recovery-mnemonic-file (or CHIA_VAULT_RECOVERY_MNEMONIC)."
-                        );
-                    }
+                    print_found(&found, network);
+                    println!("{LOOKUP_CAN_RECOVER}");
+                    println!(
+                        "When you are ready: chia-vault-recover start --vault <address> \
+                         --recovery-mnemonic-file … --new-custody-mnemonic-file …"
+                    );
                 }
                 LookupReport::NeedFallback(gap) => {
                     print_fallback(network, &gap);
@@ -204,34 +187,6 @@ async fn main() -> Result<()> {
         } => {
             let recovery_mnemonic =
                 read_mnemonic(recovery_mnemonic, recovery_mnemonic_file, "recovery")?;
-            let (client, network, config) = match (vault, config) {
-                (Some(_), Some(_)) => {
-                    bail!("pass --vault <xch1…> or --config <vault-config.json>, not both")
-                }
-                (Some(vault), None) => {
-                    let (client, network) = client_for(&vault, network, backend)?;
-                    let report = workflow::lookup(&client, &vault).await?;
-                    let found = match report {
-                        LookupReport::Found(found) => found,
-                        LookupReport::NeedFallback(gap) => {
-                            print_fallback(network, &gap);
-                            bail!("cannot start recovery until lookup finds a custody spend");
-                        }
-                    };
-                    let rebuilt = reconstruct(&found, &recovery_mnemonic, clawback_secs)?;
-                    rebuilt.config.save(&lookup_config)?;
-                    print_reconstructed(&rebuilt, network, Some(&lookup_config))?;
-                    (client, network, rebuilt.config)
-                }
-                (None, Some(path)) => {
-                    let network = Network::from(network);
-                    let client = ChainClient::new(network, &backend.into_backend()?);
-                    (client, network, VaultConfig::load(&path)?)
-                }
-                (None, None) => {
-                    bail!("pass --vault <xch1…> (recommended) or --config <vault-config.json>")
-                }
-            };
             let new_custody_mnemonic = read_mnemonic(
                 new_custody_mnemonic,
                 new_custody_mnemonic_file,
@@ -246,39 +201,63 @@ async fn main() -> Result<()> {
                 24 => MnemonicWordCount::Words24,
                 _ => bail!("word_count must be 12 or 24"),
             };
-
-            let result = workflow::start(
-                &client,
-                StartWorkflow {
-                    config: &config,
-                    recovery_mnemonic: &recovery_mnemonic,
-                    new_custody_mnemonic: &new_custody_mnemonic,
-                    new_recovery_mnemonic: new_recovery_mnemonic.as_deref(),
-                    new_clawback_timelock: new_clawback_secs,
-                    new_word_count: word_count,
-                    network,
-                    out_config: &out_config,
-                },
-            )
-            .await?;
-
-            println!("pushed start recovery spend");
-            println!(
-                "wrote public post-recovery config: {}",
-                out_config.display()
-            );
-            println!(
-                "clawback_timelock_secs: {} — wait, then run finish",
-                result.clawback_timelock
-            );
-            if let Some(words) = result.generated_recovery_mnemonic {
-                println!();
-                println!(
-                    "*** SAVE THIS NEW RECOVERY MNEMONIC (shown once, not written to config) ***"
-                );
-                println!("{words}");
-                println!("***");
-            }
+            match (vault, config) {
+                (Some(_), Some(_)) => {
+                    bail!("pass --vault <xch1…> or --config <vault-config.json>, not both")
+                }
+                (Some(vault), None) => {
+                    let (client, network) = client_for(&vault, network, backend)?;
+                    let report = workflow::lookup(&client, &vault).await?;
+                    let found = match report {
+                        LookupReport::Found(found) => found,
+                        LookupReport::NeedFallback(gap) => {
+                            print_fallback(network, &gap);
+                            bail!("cannot start recovery until lookup finds a custody spend");
+                        }
+                    };
+                    let (rebuilt, result) = workflow::start_from_found(
+                        &client,
+                        StartFromFound {
+                            found: &found,
+                            recovery_mnemonic: &recovery_mnemonic,
+                            new_custody_mnemonic: &new_custody_mnemonic,
+                            new_recovery_mnemonic: new_recovery_mnemonic.as_deref(),
+                            clawback_secs,
+                            new_clawback_timelock: new_clawback_secs,
+                            new_word_count: word_count,
+                            network,
+                            out_config: &out_config,
+                            lookup_config: &lookup_config,
+                        },
+                    )
+                    .await?;
+                    print_reconstructed(&rebuilt, network, Some(&lookup_config))?;
+                    print_start_result(&out_config, &result);
+                }
+                (None, Some(path)) => {
+                    let network = Network::from(network);
+                    let client = ChainClient::new(network, &backend.into_backend()?);
+                    let config = VaultConfig::load(&path)?;
+                    let result = workflow::start(
+                        &client,
+                        StartWorkflow {
+                            config: &config,
+                            recovery_mnemonic: &recovery_mnemonic,
+                            new_custody_mnemonic: &new_custody_mnemonic,
+                            new_recovery_mnemonic: new_recovery_mnemonic.as_deref(),
+                            new_clawback_timelock: new_clawback_secs,
+                            new_word_count: word_count,
+                            network,
+                            out_config: &out_config,
+                        },
+                    )
+                    .await?;
+                    print_start_result(&out_config, &result);
+                }
+                (None, None) => {
+                    bail!("pass --vault <xch1…> (recommended) or --config <vault-config.json>")
+                }
+            };
         }
         Commands::Finish {
             config,
@@ -339,6 +318,29 @@ fn print_found(found: &FoundVault, network: Network) {
     println!("network: {}", network.as_str());
     println!("launcher_id: 0x{}", hex::encode(found.launcher_id));
     println!("resolved_from: {}", found.launcher_source);
+    if found.custody.members_complete() {
+        println!("custody members: parsed from spend");
+    } else {
+        println!("custody members: hash only (M-of-N or unparsed); enough for delayed recovery");
+    }
+}
+
+fn print_start_result(out_config: &std::path::Path, result: &StartRecoveryResult) {
+    println!("pushed start recovery spend");
+    println!(
+        "wrote public post-recovery config: {}",
+        out_config.display()
+    );
+    println!(
+        "clawback_timelock_secs: {} — wait, then run finish",
+        result.clawback_timelock
+    );
+    if let Some(words) = &result.generated_recovery_mnemonic {
+        println!();
+        println!("*** SAVE THIS NEW RECOVERY MNEMONIC (shown once, not written to config) ***");
+        println!("{words}");
+        println!("***");
+    }
 }
 
 fn print_reconstructed(
@@ -383,13 +385,6 @@ fn print_fallback(network: Network, gap: &chia_vault_recover::LookupGap) {
         println!("resolved_from: {}", launcher.source);
     }
     println!("{}", fallback_guidance(gap));
-}
-
-fn optional_mnemonic(inline: Option<String>, file: Option<PathBuf>) -> Result<Option<String>> {
-    match (inline, file) {
-        (None, None) => Ok(None),
-        (m, f) => Ok(Some(read_mnemonic(m, f, "recovery")?)),
-    }
 }
 
 fn read_mnemonic(inline: Option<String>, file: Option<PathBuf>, label: &str) -> Result<String> {
