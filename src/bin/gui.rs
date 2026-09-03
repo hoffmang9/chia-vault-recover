@@ -40,6 +40,13 @@ fn main() -> eframe::Result<()> {
     )
 }
 
+const INTRO_GUIDANCE: &str =
+    "Enter the vault Receive address (xch1… / txch1…) from Cloud Wallet, then click Look up vault.";
+const LOADED_CONFIG_GUIDANCE: &str =
+    "Using a downloaded vault-config JSON. Inspect, then Start recovery.";
+const AFTER_START_GUIDANCE: &str =
+    "Vault entering RECOVERY. After the clawback period, click Finish recovery.";
+
 enum AppStep {
     NeedLookup,
     Found {
@@ -47,9 +54,13 @@ enum AppStep {
         found: FoundVault,
     },
     NeedFallback(chia_vault_recover::LookupGap),
-    Ready {
-        vault_input: Option<String>,
-        found: Option<FoundVault>,
+    ReadyFromLookup {
+        vault_input: String,
+        found: FoundVault,
+        next: String,
+    },
+    ReadyFromFile {
+        next: String,
     },
 }
 
@@ -66,7 +77,6 @@ struct App {
     full_node_url: String,
     status: String,
     generated_recovery_mnemonic: Option<String>,
-    last_guidance: String,
     step: AppStep,
 }
 
@@ -85,9 +95,6 @@ impl Default for App {
             full_node_url: String::new(),
             status: String::new(),
             generated_recovery_mnemonic: None,
-            last_guidance: String::from(
-                "Enter the vault Receive address (xch1… / txch1…) from Cloud Wallet, then click Look up vault.",
-            ),
             step: AppStep::NeedLookup,
         }
     }
@@ -126,13 +133,27 @@ impl App {
     }
 
     fn layout_ready(&self) -> bool {
-        matches!(self.step, AppStep::Ready { .. })
+        matches!(
+            self.step,
+            AppStep::ReadyFromLookup { .. } | AppStep::ReadyFromFile { .. }
+        )
     }
 
     fn guidance(&self) -> String {
         match &self.step {
+            AppStep::NeedLookup => INTRO_GUIDANCE.to_string(),
+            AppStep::Found { .. } => LOOKUP_READY_FOR_PHRASE.to_string(),
             AppStep::NeedFallback(gap) => fallback_guidance(gap),
-            _ => self.last_guidance.clone(),
+            AppStep::ReadyFromLookup { next, .. } | AppStep::ReadyFromFile { next } => next.clone(),
+        }
+    }
+
+    fn set_ready_next(&mut self, next: String) {
+        match &mut self.step {
+            AppStep::ReadyFromLookup { next: slot, .. } | AppStep::ReadyFromFile { next: slot } => {
+                *slot = next;
+            }
+            _ => {}
         }
     }
 
@@ -140,11 +161,10 @@ impl App {
         match &self.step {
             AppStep::Found {
                 vault_input, found, ..
+            }
+            | AppStep::ReadyFromLookup {
+                vault_input, found, ..
             } if vault_input == vault => Some(found),
-            AppStep::Ready {
-                vault_input: Some(input),
-                found: Some(found),
-            } if input == vault => Some(found),
             _ => None,
         }
     }
@@ -202,9 +222,8 @@ impl eframe::App for App {
                             && let Some(path) = rfd::FileDialog::new().pick_file()
                         {
                             self.config_path = path.display().to_string();
-                            self.step = AppStep::Ready {
-                                vault_input: None,
-                                found: None,
+                            self.step = AppStep::ReadyFromFile {
+                                next: LOADED_CONFIG_GUIDANCE.to_string(),
                             };
                         }
                     });
@@ -311,23 +330,22 @@ impl App {
         };
         rebuilt.config.save(&out)?;
         self.config_path = out.display().to_string();
-        self.last_guidance = reconstruct_success_guidance(rebuilt.matches_current);
         self.status = format!(
             "Looked up launcher 0x{} ({}). Wrote {}. You do not need a vault-config download.",
             hex::encode(rebuilt.config.launcher_id_bytes()?),
             rebuilt.found.launcher_source,
             out.display()
         );
-        self.step = AppStep::Ready {
-            vault_input: Some(self.vault_address.trim().to_string()),
-            found: Some(rebuilt.found),
+        self.step = AppStep::ReadyFromLookup {
+            vault_input: self.vault_address.trim().to_string(),
+            found: rebuilt.found,
+            next: reconstruct_success_guidance(rebuilt.matches_current),
         };
         Ok(())
     }
 
     fn apply_found(&mut self, found: FoundVault, network: Network) {
         self.network_mainnet = matches!(network, Network::Mainnet);
-        self.last_guidance = LOOKUP_READY_FOR_PHRASE.to_string();
         self.status = format!(
             "Launcher 0x{} from {}. Paste the recovery phrase and Look up vault again.",
             hex::encode(found.launcher_id),
@@ -401,16 +419,13 @@ impl App {
     fn load_existing_config(&mut self) {
         let result = (|| {
             let config = VaultConfig::load(&self.config_path)?;
-            self.step = AppStep::Ready {
-                vault_input: None,
-                found: None,
+            self.step = AppStep::ReadyFromFile {
+                next: LOADED_CONFIG_GUIDANCE.to_string(),
             };
             self.status = format!(
                 "Loaded {}. launcher {}",
                 self.config_path, config.launcher_id
             );
-            self.last_guidance =
-                "Using a downloaded vault-config JSON. Inspect, then Start recovery.".into();
             Ok::<(), chia_vault_recover::Error>(())
         })();
         if let Err(e) = result {
@@ -429,7 +444,7 @@ impl App {
             };
             let (client, _) = self.chain_client()?;
             let report = runtime().block_on(workflow::inspect(&client, &config, post.as_ref()))?;
-            self.last_guidance = report.guidance.clone();
+            self.set_ready_next(report.guidance.clone());
             self.status = match report.phase {
                 VaultPhase::InRecovery => format!("Phase: InRecovery — {}", report.guidance),
                 phase => format!("Phase: {phase:?}"),
@@ -483,8 +498,7 @@ impl App {
                 start.clawback_timelock,
                 out.display()
             );
-            self.last_guidance =
-                "Vault entering RECOVERY. After the clawback period, click Finish recovery.".into();
+            self.set_ready_next(AFTER_START_GUIDANCE.to_string());
             Ok::<(), chia_vault_recover::Error>(())
         })();
         if let Err(e) = result {
