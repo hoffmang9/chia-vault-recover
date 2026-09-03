@@ -34,11 +34,11 @@ A **Download Config** button is coming soon to [vault.chia.net](https://vault.ch
 The file is public vault layout only. It does **not** include your recovery passphrase or any private key.
 
 1. Log in at [vault.chia.net](https://vault.chia.net) (or the testnet Cloud Wallet host).
-2. Open the vault you want. To export every vault, stay on the vaults list.
+2. Open the vault you want (one `vault-config-*.json`). To export every vault as a single `vault-configs.json`, stay on the vaults list.
 3. Open DevTools → Console (macOS: Option-Command-J; Windows/Linux: Ctrl+Shift+J).
 4. Paste the contents of [`scripts/download-vault-config.js`](scripts/download-vault-config.js) and press Enter.
-5. The browser downloads `vault-config-*.json`. Store it with your backups.
-6. Confirm it matches the chain before recovery:
+5. The browser downloads **one** file. For a list export, copy one object from `vaults[]` into its own file before `inspect`.
+6. Confirm a single-vault file matches the chain before recovery:
 
 ```bash
 chia-vault-recover inspect --config vault-config.json
