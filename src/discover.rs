@@ -242,24 +242,38 @@ pub fn reconstruct(
     )))
 }
 
-/// Optional post-lookup check. Phrase is used only in memory.
+/// Result of an optional post-lookup clawback check. Phrase is used only in memory.
+#[derive(Debug, Clone)]
+pub enum ClawbackCheck {
+    Hint(u64),
+    Verified(Box<ReconstructedVault>),
+}
+
+impl ClawbackCheck {
+    pub fn guess(&self) -> ClawbackGuess {
+        match self {
+            Self::Hint(secs) => ClawbackGuess::Hint(*secs),
+            Self::Verified(rebuilt) => {
+                ClawbackGuess::Known(rebuilt.config.recovery.clawback_timelock)
+            }
+        }
+    }
+}
+
 pub fn check_clawback(
     found: &FoundVault,
     recovery_mnemonic: Option<&str>,
     clawback_secs: Option<u64>,
-) -> Result<(ClawbackGuess, Option<ReconstructedVault>)> {
+) -> Result<ClawbackCheck> {
     let words = recovery_mnemonic.map(str::trim).filter(|s| !s.is_empty());
     match (words, clawback_secs) {
         (None, None) => Err(Error::msg(
             "enter a clawback window and/or the recovery phrase to check now, or skip and do this later",
         )),
-        (None, Some(secs)) => Ok((ClawbackGuess::Hint(secs), None)),
+        (None, Some(secs)) => Ok(ClawbackCheck::Hint(secs)),
         (Some(words), secs) => {
             let rebuilt = reconstruct(found, words, ClawbackGuess::Unknown.with_typed(secs))?;
-            Ok((
-                ClawbackGuess::Known(rebuilt.config.recovery.clawback_timelock),
-                Some(rebuilt),
-            ))
+            Ok(ClawbackCheck::Verified(Box::new(rebuilt)))
         }
     }
 }
@@ -520,9 +534,9 @@ mod tests {
 
     #[test]
     fn check_clawback_hint_without_phrase() {
-        let (guess, rebuilt) = check_clawback(&dummy_found(), None, Some(43_200)).unwrap();
-        assert_eq!(guess, ClawbackGuess::Hint(43_200));
-        assert!(rebuilt.is_none());
+        let check = check_clawback(&dummy_found(), None, Some(43_200)).unwrap();
+        assert!(matches!(check, ClawbackCheck::Hint(43_200)));
+        assert_eq!(check.guess(), ClawbackGuess::Hint(43_200));
     }
 
     #[test]

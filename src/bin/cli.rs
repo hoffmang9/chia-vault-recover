@@ -4,9 +4,7 @@ use anyhow::{Context, Result, bail};
 use chia_vault_recover::cache::LookupCache;
 use chia_vault_recover::chain::ChainClient;
 use chia_vault_recover::config::VaultConfig;
-use chia_vault_recover::discover::{
-    ClawbackGuess, FoundVault, ReconstructedVault, check_clawback, reconstruct,
-};
+use chia_vault_recover::discover::{ClawbackCheck, FoundVault, ReconstructedVault, check_clawback};
 use chia_vault_recover::guidance::{
     LOOKUP_CAN_RECOVER, fallback_guidance, reconstruct_success_guidance,
 };
@@ -174,31 +172,37 @@ async fn main() -> Result<()> {
                 LookupReport::Found(found) => {
                     print_found(&found, network);
                     let mut cache = LookupCache::open();
-                    workflow::remember_found(&mut cache, &vault, network, found.clone())?;
+                    workflow::persist_found(&mut cache, &vault, network, found.clone())?;
                     println!("lookup cache: {}", cache.path().display());
                     let words = optional_mnemonic(recovery_mnemonic, recovery_mnemonic_file)?;
                     if clawback_secs.is_some() || words.is_some() {
                         match check_clawback(&found, words.as_deref(), clawback_secs) {
-                            Ok((ClawbackGuess::Hint(secs), _)) => {
-                                workflow::remember_clawback(&mut cache, ClawbackGuess::Hint(secs))?;
-                                println!(
-                                    "saved clawback {secs}s as a hint (not verified without the recovery phrase)"
-                                );
-                            }
-                            Ok((ClawbackGuess::Known(secs), rebuilt)) => {
-                                workflow::remember_clawback(
+                            Ok(check) => {
+                                workflow::persist_guess(
                                     &mut cache,
-                                    ClawbackGuess::Known(secs),
+                                    &vault,
+                                    network,
+                                    found.clone(),
+                                    check.guess(),
                                 )?;
-                                println!("verified clawback_timelock_secs: {secs}");
-                                if let Some(rebuilt) = rebuilt {
-                                    println!(
-                                        "{}",
-                                        reconstruct_success_guidance(rebuilt.matches_current)
-                                    );
+                                match check {
+                                    ClawbackCheck::Hint(secs) => {
+                                        println!(
+                                            "saved clawback {secs}s as a hint (not verified without the recovery phrase)"
+                                        );
+                                    }
+                                    ClawbackCheck::Verified(rebuilt) => {
+                                        println!(
+                                            "verified clawback_timelock_secs: {}",
+                                            rebuilt.config.recovery.clawback_timelock
+                                        );
+                                        println!(
+                                            "{}",
+                                            reconstruct_success_guidance(rebuilt.matches_current)
+                                        );
+                                    }
                                 }
                             }
-                            Ok((ClawbackGuess::Unknown, _)) => {}
                             Err(e) => println!("clawback check: {e}"),
                         }
                     }
@@ -268,15 +272,13 @@ async fn main() -> Result<()> {
                     } else {
                         println!("lookup cache: {}", cache.path().display());
                     }
-                    let guess = cache
-                        .matching(&vault)
-                        .map(|entry| entry.clawback)
-                        .unwrap_or_default()
-                        .with_typed(clawback_secs);
-                    let rebuilt = reconstruct(&found, &recovery_mnemonic, guess)?;
-                    workflow::remember_clawback(
+                    let rebuilt = workflow::rebuild_for_start(
                         &mut cache,
-                        ClawbackGuess::Known(rebuilt.config.recovery.clawback_timelock),
+                        &vault,
+                        network,
+                        found,
+                        &recovery_mnemonic,
+                        clawback_secs,
                     )?;
                     rebuilt.config.save(&lookup_config)?;
                     print_reconstructed(&rebuilt, network, Some(&lookup_config));

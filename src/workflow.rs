@@ -9,7 +9,9 @@ use clvm_utils::TreeHash;
 use crate::cache::{CachedLookup, LookupCache};
 use crate::chain::ChainClient;
 use crate::config::VaultConfig;
-use crate::discover::{ClawbackGuess, FoundVault, custody_from_vault_spend};
+use crate::discover::{
+    ClawbackGuess, FoundVault, ReconstructedVault, custody_from_vault_spend, reconstruct,
+};
 use crate::error::{Error, Result};
 use crate::guidance::{KnownLauncher, LookupGap};
 use crate::keys::MnemonicWordCount;
@@ -190,28 +192,66 @@ pub enum LookupReport {
     NeedFallback(LookupGap),
 }
 
+fn cached_entry(
+    cache: &LookupCache,
+    address: &str,
+    network: Network,
+    found: FoundVault,
+) -> CachedLookup {
+    match cache.matching(address) {
+        Some(existing) => existing.clone().replace_found(address, network, found),
+        None => CachedLookup::new(address, network, found),
+    }
+}
+
 /// Persist a found vault, keeping a clawback guess when the launcher is unchanged.
-pub fn remember_found(
+pub fn persist_found(
     cache: &mut LookupCache,
     address: &str,
     network: Network,
     found: FoundVault,
 ) -> Result<CachedLookup> {
-    let entry = match cache.matching(address) {
-        Some(existing) => existing.clone().replace_found(address, network, found),
-        None => CachedLookup::new(address, network, found),
-    };
+    let entry = cached_entry(cache, address, network, found);
     cache.store(entry.clone())?;
     Ok(entry)
 }
 
-pub fn remember_clawback(cache: &mut LookupCache, clawback: ClawbackGuess) -> Result<()> {
-    let Some(entry) = cache.current() else {
-        return Err(Error::msg(
-            "no cached lookup for this address; look up the vault first",
-        ));
-    };
-    cache.store(entry.clone().with_clawback(clawback))
+/// Persist found vault + clawback for this address in one write.
+pub fn persist_guess(
+    cache: &mut LookupCache,
+    address: &str,
+    network: Network,
+    found: FoundVault,
+    clawback: ClawbackGuess,
+) -> Result<CachedLookup> {
+    let entry = cached_entry(cache, address, network, found).with_clawback(clawback);
+    cache.store(entry.clone())?;
+    Ok(entry)
+}
+
+/// Rebuild the public layout and persist the verified clawback.
+pub fn rebuild_for_start(
+    cache: &mut LookupCache,
+    address: &str,
+    network: Network,
+    found: FoundVault,
+    recovery_mnemonic: &str,
+    typed_clawback: Option<u64>,
+) -> Result<ReconstructedVault> {
+    let guess = cache
+        .matching(address)
+        .map(|entry| entry.clawback)
+        .unwrap_or_default()
+        .with_typed(typed_clawback);
+    let rebuilt = reconstruct(&found, recovery_mnemonic, guess)?;
+    persist_guess(
+        cache,
+        address,
+        network,
+        found,
+        ClawbackGuess::Known(rebuilt.config.recovery.clawback_timelock),
+    )?;
+    Ok(rebuilt)
 }
 
 /// Use a cached found vault when the address matches; otherwise look up and persist.
@@ -226,7 +266,7 @@ pub async fn resolve_found(
     }
     let report = lookup(client, vault).await?;
     if let LookupReport::Found(found) = &report {
-        remember_found(cache, vault, network, found.clone())?;
+        persist_found(cache, vault, network, found.clone())?;
     }
     Ok(report)
 }
@@ -338,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn remember_found_keeps_clawback_for_same_launcher() {
+    fn persist_found_keeps_clawback_for_same_launcher() {
         use crate::cache::LookupCache;
 
         let path =
@@ -352,9 +392,16 @@ mod tests {
             current_coin: coin(),
             ancestor_puzzle_hashes: vec![],
         };
-        remember_found(&mut cache, "xch1abc", Network::Mainnet, found.clone()).unwrap();
-        remember_clawback(&mut cache, ClawbackGuess::Known(43_200)).unwrap();
-        remember_found(&mut cache, "xch1abc", Network::Mainnet, found).unwrap();
+        persist_found(&mut cache, "xch1abc", Network::Mainnet, found.clone()).unwrap();
+        persist_guess(
+            &mut cache,
+            "xch1abc",
+            Network::Mainnet,
+            found.clone(),
+            ClawbackGuess::Known(43_200),
+        )
+        .unwrap();
+        persist_found(&mut cache, "xch1abc", Network::Mainnet, found).unwrap();
         assert_eq!(
             cache.current().unwrap().clawback,
             ClawbackGuess::Known(43_200)
