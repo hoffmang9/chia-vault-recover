@@ -168,8 +168,20 @@ pub fn reconstruct(
     } else {
         DEFAULT_TIMELOCK_CANDIDATES.to_vec()
     };
+    reconstruct_from_candidates(found, recovery_mnemonic, &candidates)
+}
 
-    for &timelock in &candidates {
+/// Try each clawback candidate until the reconstructed puzzle hash matches the chain.
+pub fn reconstruct_from_candidates(
+    found: &FoundVault,
+    recovery_mnemonic: &str,
+    candidates: &[u64],
+) -> Result<ReconstructedVault> {
+    if candidates.is_empty() {
+        return Err(Error::msg("no clawback candidates to try"));
+    }
+
+    for &timelock in candidates {
         let config = reconstruct_config(
             found.launcher_id,
             &found.custody,
@@ -192,7 +204,7 @@ pub fn reconstruct(
 
     Err(Error::msg(format!(
         "found custody hash 0x{} but no candidate timelock produced a matching vault puzzle hash. \
-         Pass --clawback-secs explicitly (Cloud Wallet default is 43200)",
+         Enter the clawback window explicitly (Cloud Wallet default is 43200)",
         hex::encode(found.custody.custody_hash)
     )))
 }
@@ -206,37 +218,7 @@ fn members_to_config(
     keys: &[VaultMemberKey],
     vault_launcher_ids: &[Bytes32],
 ) -> Vec<VaultConfigMember> {
-    let mut out = Vec::new();
-    for key in keys {
-        out.push(match key {
-            VaultMemberKey::Bls(pk) => VaultConfigMember::PublicKey {
-                public_key: public_key_to_hex(pk),
-                curve: Curve::Bls12_381,
-                key_type: None,
-            },
-            VaultMemberKey::K1(pk) => VaultConfigMember::PublicKey {
-                public_key: format!("0x{}", hex::encode(pk.to_bytes())),
-                curve: Curve::Secp256k1,
-                key_type: Some(KeyType::App),
-            },
-            VaultMemberKey::R1(pk) => VaultConfigMember::PublicKey {
-                public_key: format!("0x{}", hex::encode(pk.to_bytes())),
-                curve: Curve::Secp256r1,
-                key_type: Some(KeyType::App),
-            },
-            VaultMemberKey::Passkey(pk) => VaultConfigMember::PublicKey {
-                public_key: format!("0x{}", hex::encode(pk.to_bytes())),
-                curve: Curve::Webauthn,
-                key_type: Some(KeyType::Passkey),
-            },
-        });
-    }
-    for launcher_id in vault_launcher_ids {
-        out.push(VaultConfigMember::Vault {
-            launcher_id: format!("0x{}", hex::encode(launcher_id)),
-        });
-    }
-    out
+    crate::config::config_members_from_keys(keys, vault_launcher_ids)
 }
 
 fn member_looks_like_recovery(alloc: &Allocator, puzzle: Puzzle) -> bool {

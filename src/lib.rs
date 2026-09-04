@@ -1,6 +1,7 @@
 //! Recover a Chia Cloud Wallet vault with a BLS recovery passphrase.
 
 pub mod address;
+pub mod cache;
 pub mod chain;
 pub mod config;
 pub mod discover;
@@ -14,14 +15,18 @@ pub mod recovery;
 pub mod vault;
 pub mod workflow;
 
+pub use cache::{
+    CachedClawback, CachedLookup, ConfirmClawback, LookupCache, reconstruct_candidates,
+};
 pub use config::{Curve, KeyType, VaultConfig, VaultConfigMember};
 pub use discover::{
-    DiscoveredCustodyPath, FoundVault, ReconstructedVault, reconstruct, reconstruct_config,
+    DEFAULT_TIMELOCK_CANDIDATES, DiscoveredCustodyPath, FoundVault, ReconstructedVault,
+    reconstruct, reconstruct_config, reconstruct_from_candidates,
 };
 pub use error::Error;
 pub use guidance::{
-    CLAWBACK_SECS_HELP, KnownLauncher, LOOKUP_CAN_RECOVER, LookupGap, fallback_guidance,
-    reconstruct_success_guidance,
+    CACHE_LOADED, CLAWBACK_SECS_HELP, KnownLauncher, LOOKUP_CAN_RECOVER, LookupGap,
+    OPTIONAL_CONFIRM_HELP, fallback_guidance, reconstruct_success_guidance,
 };
 pub use keys::{GeneratedMnemonic, KeyPair, MnemonicWordCount};
 pub use locate::{

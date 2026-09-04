@@ -89,15 +89,29 @@ pub const LOOKUP_SUCCESS_NO_JSON: &str =
 
 /// Address-only lookup succeeded. Recovery words are not needed until Start.
 pub const LOOKUP_CAN_RECOVER: &str = "\
-This vault can be recovered. You do not need a vault-config-*.json download. \
-The recovery phrase is only needed when you Start recovery — you can close the \
-app now and come back later.";
+This vault can be recovered. The lookup is saved on disk, so you can close the \
+app and come back later without searching the chain again. You do not need a \
+vault-config-*.json download. Optionally enter the clawback window and/or \
+recovery phrase now to check the clawback — or skip and do that later when you \
+Start recovery. The recovery phrase is never written to disk.";
+
+/// Restarted with a saved lookup.
+pub const CACHE_LOADED: &str = "\
+Loaded a saved lookup. Chain search was skipped. You can Start recovery, \
+optionally confirm clawback now, or Look up vault again to refresh from the chain. \
+The recovery phrase is never stored.";
+
+/// Optional clawback / phrase check after lookup is on disk.
+pub const OPTIONAL_CONFIRM_HELP: &str = "\
+Optional now: enter the clawback window in seconds and/or the recovery phrase \
+to check the clawback against the chain. You can skip this and enter them later \
+when you Start recovery. The recovery phrase is never saved to disk.";
 
 /// Optional current-vault clawback seconds (Start only).
 pub const CLAWBACK_SECS_HELP: &str = "\
 If you know this vault’s clawback timelock in seconds, enter it. Otherwise leave \
-it empty; the app tries common Cloud Wallet values (including 43200 / 12 hours) \
-until the reconstructed spend matches the chain.";
+it empty; the app tries a saved hint (if any), then common Cloud Wallet values \
+(including 43200 / 12 hours) until the reconstructed spend matches the chain.";
 
 pub fn reconstruct_success_guidance(matches_current: bool) -> String {
     let note = if matches_current {
@@ -136,8 +150,11 @@ mod tests {
     #[test]
     fn lookup_can_recover_does_not_ask_for_phrase() {
         assert!(LOOKUP_CAN_RECOVER.contains("Start recovery"));
+        assert!(LOOKUP_CAN_RECOVER.contains("never written to disk"));
         assert!(!LOOKUP_CAN_RECOVER.contains("look up again"));
         assert!(CLAWBACK_SECS_HELP.contains("43200"));
+        assert!(OPTIONAL_CONFIRM_HELP.contains("skip"));
+        assert!(CACHE_LOADED.contains("skipped"));
     }
 
     #[test]
