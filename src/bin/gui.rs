@@ -3,10 +3,13 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
+use chia_vault_recover::cache::{CachedLookup, LookupCache};
 use chia_vault_recover::chain::ChainClient;
 use chia_vault_recover::config::VaultConfig;
-use chia_vault_recover::discover::{FoundVault, reconstruct};
-use chia_vault_recover::guidance::{CLAWBACK_SECS_HELP, LOOKUP_CAN_RECOVER, fallback_guidance};
+use chia_vault_recover::discover::{ClawbackCheck, FoundVault, check_clawback};
+use chia_vault_recover::guidance::{
+    CACHE_LOADED, CLAWBACK_SECS_HELP, LOOKUP_CAN_RECOVER, OPTIONAL_CONFIRM_HELP, fallback_guidance,
+};
 use chia_vault_recover::keys::MnemonicWordCount;
 use chia_vault_recover::locate::client_for_vault;
 use chia_vault_recover::network::{Backend, Network};
@@ -40,6 +43,8 @@ fn main() -> eframe::Result<()> {
 
 const INTRO_GUIDANCE: &str = "Enter the vault Receive address (xch1… / txch1…) from Cloud Wallet, then click Look up vault. \
      This check does not need the recovery phrase.";
+const ADDRESS_CHANGED_GUIDANCE: &str = "Receive address no longer matches the looked-up vault. \
+     Look up again, or restore the address, before starting recovery.";
 const LOADED_CONFIG_GUIDANCE: &str =
     "Using a downloaded vault-config JSON. Inspect, then Start recovery.";
 const AFTER_START_GUIDANCE: &str =
@@ -47,9 +52,8 @@ const AFTER_START_GUIDANCE: &str =
 
 enum AppStep {
     NeedLookup,
-    Found {
-        found: FoundVault,
-    },
+    /// Last successful lookup. Vault facts live in `cache`, keyed by receive address.
+    Found,
     NeedFallback(chia_vault_recover::LookupGap),
     /// Public layout is on disk (`config_path`): loaded JSON or written at Start.
     Ready {
@@ -71,11 +75,13 @@ struct App {
     status: String,
     generated_recovery_mnemonic: Option<String>,
     step: AppStep,
+    cache: LookupCache,
 }
 
 impl Default for App {
     fn default() -> Self {
-        Self {
+        let cache = LookupCache::open();
+        let mut app = Self {
             vault_address: String::new(),
             config_path: String::new(),
             post_recovery_path: String::new(),
@@ -89,7 +95,17 @@ impl Default for App {
             status: String::new(),
             generated_recovery_mnemonic: None,
             step: AppStep::NeedLookup,
+            cache,
+        };
+        if let Some(entry) = app.cache.current().cloned() {
+            app.vault_address = entry.receive_address.clone();
+            if let Some(secs) = entry.clawback.secs() {
+                app.clawback_secs = secs.to_string();
+            }
+            app.set_found(entry.network);
+            app.status = format!("{CACHE_LOADED} Cache: {}.", app.cache.path().display());
         }
+        app
     }
 }
 
@@ -126,7 +142,14 @@ impl App {
     }
 
     fn can_start(&self) -> bool {
-        matches!(self.step, AppStep::Found { .. } | AppStep::Ready { .. })
+        self.cached_vault().is_some() || matches!(self.step, AppStep::Ready { .. })
+    }
+
+    fn cached_vault(&self) -> Option<&CachedLookup> {
+        match self.step {
+            AppStep::Found => self.cache.matching(&self.vault_address),
+            _ => None,
+        }
     }
 
     fn can_inspect(&self) -> bool {
@@ -136,7 +159,8 @@ impl App {
     fn guidance(&self) -> String {
         match &self.step {
             AppStep::NeedLookup => INTRO_GUIDANCE.to_string(),
-            AppStep::Found { .. } => LOOKUP_CAN_RECOVER.to_string(),
+            AppStep::Found if self.cached_vault().is_none() => ADDRESS_CHANGED_GUIDANCE.to_string(),
+            AppStep::Found => LOOKUP_CAN_RECOVER.to_string(),
             AppStep::NeedFallback(gap) => fallback_guidance(gap),
             AppStep::Ready { next } => next.clone(),
         }
@@ -154,7 +178,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ctx, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Chia Vault Recover");
-                ui.label("Look up the Receive address first to confirm this vault can be recovered. The recovery phrase is only needed when you Start recovery.");
+                ui.label("Look up the Receive address first to confirm this vault can be recovered. A successful lookup is saved so the next launch can skip the search. The recovery phrase is never written to disk.");
                 ui.separator();
 
                 ui.strong("1. Look up vault");
@@ -198,6 +222,9 @@ impl eframe::App for App {
                 ui.add_space(8.0);
                 ui.strong("2. Start recovery");
                 if self.can_start() {
+                    if self.cached_vault().is_some() {
+                        ui.label(OPTIONAL_CONFIRM_HELP);
+                    }
                     ui.label("Cloud Wallet recovery passphrase (only needed to start delayed recovery):");
                     ui.add(
                         egui::TextEdit::multiline(&mut self.recovery_mnemonic)
@@ -213,6 +240,11 @@ impl eframe::App for App {
                                 .hint_text("e.g. 43200"),
                         );
                     });
+                    if self.cached_vault().is_some()
+                        && ui.button("Check clawback now (optional)").clicked()
+                    {
+                        self.run_confirm_clawback();
+                    }
                     ui.label("New custody mnemonic (required to start):");
                     ui.add(
                         egui::TextEdit::multiline(&mut self.new_custody_mnemonic)
@@ -296,14 +328,69 @@ impl App {
         }
     }
 
-    fn apply_found(&mut self, found: FoundVault, network: Network) {
+    fn set_found(&mut self, network: Network) {
         self.network_mainnet = matches!(network, Network::Mainnet);
-        self.status = format!(
-            "Launcher 0x{} from {}. This vault can be recovered. Enter the recovery phrase only when you Start recovery.",
-            hex::encode(found.launcher_id),
-            found.launcher_source
-        );
-        self.step = AppStep::Found { found };
+        self.step = AppStep::Found;
+    }
+
+    fn apply_found(&mut self, found: FoundVault, network: Network) {
+        let launcher = hex::encode(found.launcher_id);
+        let source = found.launcher_source.clone();
+        let address = self.vault_address.trim().to_string();
+        self.status = match self.cache.persist_found(&address, network, found) {
+            Ok(_) => {
+                self.set_found(network);
+                format!(
+                    "Launcher 0x{launcher} from {source}. Lookup saved to {}. This vault can be recovered. You can close the app and come back, or optionally check clawback now.",
+                    self.cache.path().display()
+                )
+            }
+            Err(e) => {
+                format!("Launcher 0x{launcher} from {source}. Could not save lookup cache: {e}")
+            }
+        };
+    }
+
+    fn run_confirm_clawback(&mut self) {
+        let result = (|| {
+            let Some(entry) = self.cached_vault() else {
+                return Err(chia_vault_recover::Error::msg(
+                    "look up the vault before checking clawback",
+                ));
+            };
+            let found = entry.found.clone();
+            let address = entry.receive_address.clone();
+            let words = self.recovery_mnemonic.trim();
+            let check = check_clawback(
+                &found,
+                if words.is_empty() { None } else { Some(words) },
+                self.clawback()?,
+            )?;
+            self.cache.persist_guess(&address, check.guess())?;
+            self.status = match check {
+                ClawbackCheck::Hint(secs) => {
+                    format!(
+                        "Saved clawback {secs}s as a hint. Enter the recovery phrase later to confirm it matches the chain. The phrase is never written to disk."
+                    )
+                }
+                ClawbackCheck::Verified(rebuilt) => {
+                    let secs = rebuilt.config.recovery.clawback_timelock;
+                    self.clawback_secs = secs.to_string();
+                    let match_note = if rebuilt.matches_current {
+                        "Matches the current unspent singleton."
+                    } else {
+                        "Matches a previous singleton state."
+                    };
+                    format!(
+                        "Clawback {secs}s confirmed and saved. {match_note} The recovery phrase was not written to disk. You can Start recovery when ready."
+                    )
+                }
+            };
+            Ok::<(), chia_vault_recover::Error>(())
+        })();
+        if let Err(e) = result {
+            self.status = format!("Clawback check: {e}");
+        }
     }
 
     fn apply_fallback(&mut self, gap: chia_vault_recover::LookupGap, network: Network) {
@@ -416,7 +503,7 @@ impl App {
             };
             let recovery_mnemonic = self.recovery_mnemonic.trim();
             let new_custody_mnemonic = self.new_custody_mnemonic.trim();
-            let clawback_secs = self.clawback()?;
+            let typed_clawback = self.clawback()?;
             let (client, network) = self.chain_client()?;
             let push_start = |config: &VaultConfig| {
                 runtime().block_on(workflow::start(
@@ -433,23 +520,24 @@ impl App {
                     },
                 ))
             };
-            let found = match &self.step {
-                AppStep::Found { found } => Some(found.clone()),
-                AppStep::Ready { .. } => None,
-                _ => {
-                    return Err(chia_vault_recover::Error::msg(
-                        "look up the vault or load a vault-config before Start recovery",
-                    ));
-                }
-            };
-            let start = if let Some(found) = found {
-                let rebuilt = reconstruct(&found, recovery_mnemonic, clawback_secs)?;
+            let start = if self.cached_vault().is_some() {
+                let rebuilt = workflow::rebuild_for_start(
+                    &mut self.cache,
+                    self.vault_address.trim(),
+                    recovery_mnemonic,
+                    typed_clawback,
+                )?;
+                self.clawback_secs = rebuilt.config.recovery.clawback_timelock.to_string();
                 rebuilt.config.save(&lookup_out)?;
                 self.config_path = lookup_out.display().to_string();
                 push_start(&rebuilt.config)?
-            } else {
+            } else if matches!(self.step, AppStep::Ready { .. }) {
                 let config = VaultConfig::load(&self.config_path)?;
                 push_start(&config)?
+            } else {
+                return Err(chia_vault_recover::Error::msg(
+                    "look up the vault or load a vault-config before Start recovery",
+                ));
             };
             self.post_recovery_path = out.display().to_string();
             self.generated_recovery_mnemonic = start.generated_recovery_mnemonic.clone();

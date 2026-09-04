@@ -1,4 +1,5 @@
 /target
+lookup-cache.json
 .DS_Store
 *.swp
 post-recovery-vault-config.json

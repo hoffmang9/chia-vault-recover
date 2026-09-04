@@ -10,6 +10,63 @@ use crate::error::{Error, Result};
 use crate::keys::{KeyPair, parse_bls_public_key, parse_hex_bytes, public_key_to_hex};
 use crate::vault::{CustodyPath, VaultKeys, VaultMemberKey};
 
+/// Public-key / nested-vault members in Cloud Wallet config shape.
+pub fn config_members_from_keys(
+    keys: &[VaultMemberKey],
+    vault_launcher_ids: &[Bytes32],
+) -> Vec<VaultConfigMember> {
+    let mut out = Vec::new();
+    for key in keys {
+        out.push(match key {
+            VaultMemberKey::Bls(pk) => VaultConfigMember::PublicKey {
+                public_key: public_key_to_hex(pk),
+                curve: Curve::Bls12_381,
+                key_type: None,
+            },
+            VaultMemberKey::K1(pk) => VaultConfigMember::PublicKey {
+                public_key: format!("0x{}", hex::encode(pk.to_bytes())),
+                curve: Curve::Secp256k1,
+                key_type: Some(KeyType::App),
+            },
+            VaultMemberKey::R1(pk) => VaultConfigMember::PublicKey {
+                public_key: format!("0x{}", hex::encode(pk.to_bytes())),
+                curve: Curve::Secp256r1,
+                key_type: Some(KeyType::App),
+            },
+            VaultMemberKey::Passkey(pk) => VaultConfigMember::PublicKey {
+                public_key: format!("0x{}", hex::encode(pk.to_bytes())),
+                curve: Curve::Webauthn,
+                key_type: Some(KeyType::Passkey),
+            },
+        });
+    }
+    for launcher_id in vault_launcher_ids {
+        out.push(VaultConfigMember::Vault {
+            launcher_id: format!("0x{}", hex::encode(launcher_id)),
+        });
+    }
+    out
+}
+
+/// Inverse of [`config_members_from_keys`]. Empty input is allowed (hash-only custody).
+pub fn keys_from_config_members(
+    members: &[VaultConfigMember],
+) -> Result<(Vec<VaultMemberKey>, Vec<Bytes32>)> {
+    let mut keys = Vec::new();
+    let mut vault_launcher_ids = Vec::new();
+    for member in members {
+        match member {
+            VaultConfigMember::PublicKey {
+                public_key, curve, ..
+            } => keys.push(member_key(*curve, public_key)?),
+            VaultConfigMember::Vault { launcher_id } => {
+                vault_launcher_ids.push(parse_bytes32(launcher_id)?);
+            }
+        }
+    }
+    Ok((keys, vault_launcher_ids))
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum Curve {
@@ -132,18 +189,7 @@ impl VaultConfig {
 }
 
 fn side_to_signers(side: &VaultConfigSide) -> Result<crate::vault::SignerSet> {
-    let mut keys = Vec::new();
-    let mut vault_launcher_ids = Vec::new();
-    for member in &side.members {
-        match member {
-            VaultConfigMember::PublicKey {
-                public_key, curve, ..
-            } => keys.push(member_key(*curve, public_key)?),
-            VaultConfigMember::Vault { launcher_id } => {
-                vault_launcher_ids.push(parse_bytes32(launcher_id)?);
-            }
-        }
-    }
+    let (keys, vault_launcher_ids) = keys_from_config_members(&side.members)?;
     if keys.is_empty() && vault_launcher_ids.is_empty() {
         return Err(Error::msg("custody/recovery side has no members"));
     }

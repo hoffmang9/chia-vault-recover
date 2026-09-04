@@ -1,9 +1,10 @@
 use std::path::PathBuf;
 
 use anyhow::{Context, Result, bail};
+use chia_vault_recover::cache::LookupCache;
 use chia_vault_recover::chain::ChainClient;
 use chia_vault_recover::config::VaultConfig;
-use chia_vault_recover::discover::{FoundVault, ReconstructedVault, reconstruct};
+use chia_vault_recover::discover::{ClawbackCheck, FoundVault, ReconstructedVault, check_clawback};
 use chia_vault_recover::guidance::{
     LOOKUP_CAN_RECOVER, fallback_guidance, reconstruct_success_guidance,
 };
@@ -37,6 +38,14 @@ enum Commands {
         network: NetworkArg,
         #[command(flatten)]
         backend: BackendArgs,
+        /// Optional clawback window. Saved as a hint unless a recovery phrase is also given.
+        #[arg(long)]
+        clawback_secs: Option<u64>,
+        /// Optional. Used only to verify `--clawback-secs` (or discover it). Never written to the cache.
+        #[arg(long, env = "CHIA_VAULT_RECOVERY_MNEMONIC")]
+        recovery_mnemonic: Option<String>,
+        #[arg(long)]
+        recovery_mnemonic_file: Option<PathBuf>,
     },
     /// Start delayed recovery (signs with the Cloud Wallet recovery phrase)
     Start(Box<StartArgs>),
@@ -88,8 +97,8 @@ struct StartArgs {
     #[arg(long)]
     new_clawback_secs: Option<u64>,
     /// Current vault clawback window in seconds. If you know it, pass it.
-    /// If omitted, common Cloud Wallet values (including 43200 / 12h) are
-    /// tried until the reconstructed spend matches the chain.
+    /// If omitted, a cached known/hint value is used, then common Cloud Wallet
+    /// values (including 43200 / 12h) until the reconstructed spend matches.
     #[arg(long)]
     clawback_secs: Option<u64>,
     #[arg(long, default_value = "mainnet")]
@@ -153,12 +162,44 @@ async fn main() -> Result<()> {
             vault,
             network,
             backend,
+            clawback_secs,
+            recovery_mnemonic,
+            recovery_mnemonic_file,
         } => {
             let (client, network) = client_for(&vault, network, backend)?;
             let report = workflow::lookup(&client, &vault).await?;
             match report {
                 LookupReport::Found(found) => {
                     print_found(&found, network);
+                    let mut cache = LookupCache::open();
+                    cache.persist_found(&vault, network, found.clone())?;
+                    println!("lookup cache: {}", cache.path().display());
+                    let words = optional_mnemonic(recovery_mnemonic, recovery_mnemonic_file)?;
+                    if clawback_secs.is_some() || words.is_some() {
+                        match check_clawback(&found, words.as_deref(), clawback_secs) {
+                            Ok(check) => {
+                                cache.persist_guess(&vault, check.guess())?;
+                                match check {
+                                    ClawbackCheck::Hint(secs) => {
+                                        println!(
+                                            "saved clawback {secs}s as a hint (not verified without the recovery phrase)"
+                                        );
+                                    }
+                                    ClawbackCheck::Verified(rebuilt) => {
+                                        println!(
+                                            "verified clawback_timelock_secs: {}",
+                                            rebuilt.config.recovery.clawback_timelock
+                                        );
+                                        println!(
+                                            "{}",
+                                            reconstruct_success_guidance(rebuilt.matches_current)
+                                        );
+                                    }
+                                }
+                            }
+                            Err(e) => println!("clawback check: {e}"),
+                        }
+                    }
                     println!("{LOOKUP_CAN_RECOVER}");
                     println!(
                         "When you are ready: chia-vault-recover start --vault <address> \
@@ -211,10 +252,31 @@ async fn main() -> Result<()> {
                 }
                 (Some(vault), None) => {
                     let (client, network) = client_for(&vault, network, backend)?;
-                    let found = require_found(network, workflow::lookup(&client, &vault).await?)?;
-                    let rebuilt = reconstruct(&found, &recovery_mnemonic, clawback_secs)?;
+                    let mut cache = LookupCache::open();
+                    let from_cache = cache.matching(&vault).is_some();
+                    require_found(
+                        network,
+                        workflow::resolve_found(&client, &mut cache, &vault, network).await?,
+                    )?;
+                    if from_cache {
+                        println!(
+                            "using cached lookup ({}); run lookup again to refresh from the chain",
+                            cache.path().display()
+                        );
+                    } else {
+                        println!("lookup cache: {}", cache.path().display());
+                    }
+                    let rebuilt = workflow::rebuild_for_start(
+                        &mut cache,
+                        &vault,
+                        &recovery_mnemonic,
+                        clawback_secs,
+                    )?;
                     rebuilt.config.save(&lookup_config)?;
                     print_reconstructed(&rebuilt, network, Some(&lookup_config));
+                    if from_cache {
+                        println!("skipped chain search (cached found vault)");
+                    }
                     (client, network, rebuilt.config)
                 }
                 (None, Some(path)) => {
@@ -383,4 +445,11 @@ fn read_mnemonic(inline: Option<String>, file: Option<PathBuf>, label: &str) -> 
         return Ok(std::fs::read_to_string(path)?.trim().to_string());
     }
     inline.with_context(|| format!("{label} mnemonic required (--*-mnemonic or --*-mnemonic-file)"))
+}
+
+fn optional_mnemonic(inline: Option<String>, file: Option<PathBuf>) -> Result<Option<String>> {
+    if let Some(path) = file {
+        return Ok(Some(std::fs::read_to_string(path)?.trim().to_string()));
+    }
+    Ok(inline)
 }

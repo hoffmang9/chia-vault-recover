@@ -6,9 +6,12 @@ use chia_protocol::Coin;
 use chia_puzzle_types::Proof;
 use clvm_utils::TreeHash;
 
+use crate::cache::LookupCache;
 use crate::chain::ChainClient;
 use crate::config::VaultConfig;
-use crate::discover::{FoundVault, custody_from_vault_spend};
+use crate::discover::{
+    ClawbackGuess, FoundVault, ReconstructedVault, custody_from_vault_spend, reconstruct,
+};
 use crate::error::{Error, Result};
 use crate::guidance::{KnownLauncher, LookupGap};
 use crate::keys::MnemonicWordCount;
@@ -189,6 +192,43 @@ pub enum LookupReport {
     NeedFallback(LookupGap),
 }
 
+/// Rebuild the public layout from the cached vault and persist the verified clawback.
+pub fn rebuild_for_start(
+    cache: &mut LookupCache,
+    address: &str,
+    recovery_mnemonic: &str,
+    typed_clawback: Option<u64>,
+) -> Result<ReconstructedVault> {
+    let entry = cache.require(address)?;
+    let rebuilt = reconstruct(
+        &entry.found,
+        recovery_mnemonic,
+        entry.clawback.with_typed(typed_clawback),
+    )?;
+    cache.persist_guess(
+        address,
+        ClawbackGuess::Known(rebuilt.config.recovery.clawback_timelock),
+    )?;
+    Ok(rebuilt)
+}
+
+/// Use a cached found vault when the address matches; otherwise look up and persist.
+pub async fn resolve_found(
+    client: &ChainClient,
+    cache: &mut LookupCache,
+    vault: &str,
+    network: Network,
+) -> Result<LookupReport> {
+    if let Some(cached) = cache.matching(vault) {
+        return Ok(LookupReport::Found(cached.found.clone()));
+    }
+    let report = lookup(client, vault).await?;
+    if let LookupReport::Found(found) = &report {
+        cache.persist_found(vault, network, found.clone())?;
+    }
+    Ok(report)
+}
+
 /// Address-first lookup: resolve launcher and a prior custody spend.
 pub async fn lookup(client: &ChainClient, vault: &str) -> Result<LookupReport> {
     let locator = parse_vault_locator(vault)?;
@@ -255,6 +295,7 @@ mod tests {
     use clvm_utils::TreeHash;
 
     use super::*;
+    use crate::cache::LookupCache;
     use crate::discover::DiscoveredCustodyPath;
 
     fn coin() -> Coin {
@@ -292,6 +333,20 @@ mod tests {
             LookupReport::NeedFallback(LookupGap::NoCustodySpend(_)) => {}
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn rebuild_for_start_requires_cached_vault() {
+        let path = std::env::temp_dir().join(format!(
+            "cvr-workflow-unbound-{}-{}.json",
+            std::process::id(),
+            "rebuild"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut cache = LookupCache::open_at(&path);
+        let err = rebuild_for_start(&mut cache, "xch1abc", "abandon abandon", None).unwrap_err();
+        assert!(err.to_string().contains("look up"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
