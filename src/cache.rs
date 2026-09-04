@@ -149,6 +149,38 @@ impl LookupCache {
         self.entry = Some(entry);
         Ok(())
     }
+
+    pub(crate) fn require(&self, address: &str) -> Result<CachedLookup> {
+        self.matching(address)
+            .cloned()
+            .ok_or_else(|| Error::msg("no cached lookup for this address; look up the vault first"))
+    }
+
+    /// Bind identity. Keeps a clawback guess when the launcher is unchanged.
+    pub fn persist_found(
+        &mut self,
+        address: &str,
+        network: Network,
+        found: FoundVault,
+    ) -> Result<CachedLookup> {
+        let entry = match self.matching(address) {
+            Some(existing) => existing.clone().replace_found(address, network, found),
+            None => CachedLookup::new(address, network, found),
+        };
+        self.store(entry.clone())?;
+        Ok(entry)
+    }
+
+    /// Update clawback on the matching entry. Will not create or rebind a vault.
+    pub fn persist_guess(
+        &mut self,
+        address: &str,
+        clawback: ClawbackGuess,
+    ) -> Result<CachedLookup> {
+        let entry = self.require(address)?.with_clawback(clawback);
+        self.store(entry.clone())?;
+        Ok(entry)
+    }
 }
 
 fn cache_key(address: &str) -> String {
@@ -300,6 +332,42 @@ mod tests {
     fn addresses_match_trims_and_ignores_case() {
         assert!(addresses_match("  XCH1ABC  ", "xch1abc"));
         assert!(!addresses_match("xch1abc", "xch1abd"));
+    }
+
+    #[test]
+    fn persist_found_keeps_clawback_for_same_launcher() {
+        let path = temp_path();
+        let mut cache = LookupCache::open_at(&path);
+        cache
+            .persist_found("xch1abc", Network::Mainnet, found(0xaa))
+            .unwrap();
+        cache
+            .persist_guess("xch1abc", ClawbackGuess::Known(43_200))
+            .unwrap();
+        cache
+            .persist_found("xch1abc", Network::Mainnet, found(0xaa))
+            .unwrap();
+        assert_eq!(
+            cache.current().unwrap().clawback,
+            ClawbackGuess::Known(43_200)
+        );
+        let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn persist_guess_refuses_unbound_address() {
+        let path = temp_path();
+        let mut cache = LookupCache::open_at(&path);
+        cache
+            .persist_found("xch1abc", Network::Mainnet, found(0xaa))
+            .unwrap();
+        let err = cache
+            .persist_guess("xch1other", ClawbackGuess::Hint(1))
+            .unwrap_err();
+        assert!(err.to_string().contains("look up"));
+        assert!(cache.matching("xch1other").is_none());
+        assert_eq!(cache.current().unwrap().receive_address, "xch1abc");
+        let _ = fs::remove_file(path);
     }
 
     #[test]

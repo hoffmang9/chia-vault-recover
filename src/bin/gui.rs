@@ -337,7 +337,7 @@ impl App {
         let launcher = hex::encode(found.launcher_id);
         let source = found.launcher_source.clone();
         let address = self.vault_address.trim().to_string();
-        self.status = match workflow::persist_found(&mut self.cache, &address, network, found) {
+        self.status = match self.cache.persist_found(&address, network, found) {
             Ok(_) => {
                 self.set_found(network);
                 format!(
@@ -366,7 +366,7 @@ impl App {
                 if words.is_empty() { None } else { Some(words) },
                 self.clawback()?,
             )?;
-            workflow::persist_guess(&mut self.cache, &address, check.guess())?;
+            self.cache.persist_guess(&address, check.guess())?;
             self.status = match check {
                 ClawbackCheck::Hint(secs) => {
                     format!(

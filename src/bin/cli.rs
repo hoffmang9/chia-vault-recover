@@ -172,13 +172,13 @@ async fn main() -> Result<()> {
                 LookupReport::Found(found) => {
                     print_found(&found, network);
                     let mut cache = LookupCache::open();
-                    workflow::persist_found(&mut cache, &vault, network, found.clone())?;
+                    cache.persist_found(&vault, network, found.clone())?;
                     println!("lookup cache: {}", cache.path().display());
                     let words = optional_mnemonic(recovery_mnemonic, recovery_mnemonic_file)?;
                     if clawback_secs.is_some() || words.is_some() {
                         match check_clawback(&found, words.as_deref(), clawback_secs) {
                             Ok(check) => {
-                                workflow::persist_guess(&mut cache, &vault, check.guess())?;
+                                cache.persist_guess(&vault, check.guess())?;
                                 match check {
                                     ClawbackCheck::Hint(secs) => {
                                         println!(
