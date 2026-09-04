@@ -50,6 +50,10 @@ jobs:
     name: Build (${{ matrix.name }})
     needs: [lint, test]
     runs-on: ${{ matrix.os }}
+    # Repo default token is read-only; attaching files to a published release
+    # needs contents:write (softprops/action-gh-release updates the release).
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
@@ -118,11 +122,11 @@ jobs:
           lipo -create \
             target/aarch64-apple-darwin/release/chia-vault-recover \
             target/x86_64-apple-darwin/release/chia-vault-recover \
-            -output dist/chia-vault-recover
+            -output dist/chia-vault-recover-${{ matrix.artifact }}
           lipo -create \
             target/aarch64-apple-darwin/release/chia-vault-recover-gui \
             target/x86_64-apple-darwin/release/chia-vault-recover-gui \
-            -output dist/chia-vault-recover-gui
+            -output dist/chia-vault-recover-gui-${{ matrix.artifact }}
           chmod +x dist/*
 
       - name: Stage artifacts (non-universal)
@@ -133,9 +137,9 @@ jobs:
           EXT=""
           if [[ "${{ runner.os }}" == "Windows" ]]; then EXT=".exe"; fi
           TARGET_DIR="target/${{ matrix.target }}/release"
-          cp "$TARGET_DIR/chia-vault-recover${EXT}" "dist/chia-vault-recover${EXT}"
+          cp "$TARGET_DIR/chia-vault-recover${EXT}" "dist/chia-vault-recover-${{ matrix.artifact }}${EXT}"
           if [[ -f "$TARGET_DIR/chia-vault-recover-gui${EXT}" ]]; then
-            cp "$TARGET_DIR/chia-vault-recover-gui${EXT}" "dist/chia-vault-recover-gui${EXT}"
+            cp "$TARGET_DIR/chia-vault-recover-gui${EXT}" "dist/chia-vault-recover-gui-${{ matrix.artifact }}${EXT}"
           fi
 
       - name: Upload CI artifacts
