@@ -174,8 +174,8 @@ impl App {
 }
 
 impl eframe::App for App {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        egui::CentralPanel::default().show(ctx, |ui| {
+    fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ui, |ui| {
             egui::ScrollArea::vertical().show(ui, |ui| {
                 ui.heading("Chia Vault Recover");
                 ui.label("Look up the Receive address first to confirm this vault can be recovered. A successful lookup is saved so the next launch can skip the search. The recovery phrase is never written to disk.");
