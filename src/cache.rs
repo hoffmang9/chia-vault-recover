@@ -59,8 +59,13 @@ impl CachedLookup {
     }
 
     fn matches_address(&self, address: &str) -> bool {
-        cache_key(&self.receive_address) == cache_key(address)
+        addresses_match(&self.receive_address, address)
     }
+}
+
+/// True when two receive addresses name the same vault (trim + case).
+pub fn addresses_match(left: &str, right: &str) -> bool {
+    cache_key(left) == cache_key(right)
 }
 
 /// Single-vault lookup cache.
@@ -289,6 +294,12 @@ mod tests {
         assert_eq!(current.receive_address, "txch1bbb");
         assert!(cache.matching("xch1aaa").is_none());
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn addresses_match_trims_and_ignores_case() {
+        assert!(addresses_match("  XCH1ABC  ", "xch1abc"));
+        assert!(!addresses_match("xch1abc", "xch1abd"));
     }
 
     #[test]
