@@ -24,7 +24,7 @@ path = "src/bin/gui.rs"
 
 [dependencies]
 anyhow = "1"
-bech32 = "0.9"
+bech32 = "0.12"
 bip39 = { version = "2.2", features = ["rand"] }
 chia-bls = "0.36"
 chia-consensus = "0.36"
