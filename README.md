@@ -199,13 +199,7 @@ No `m/12381/8444/...` path. Matches Cloud Wallet `bls.ts`.
 
 A successful lookup writes the public chain facts (launcher, custody path, current coin, ancestor puzzle hashes) to a JSON file shared by the GUI and CLI. The recovery phrase is never stored.
 
-Default path:
-
-- macOS: `~/Library/Application Support/chia-vault-recover/lookup-cache.json`
-- Linux: `~/.local/share/chia-vault-recover/lookup-cache.json`
-- Windows: `%APPDATA%\chia-vault-recover\lookup-cache.json`
-
-Override with `CHIA_VAULT_RECOVER_CACHE`.
+Default path (macOS, Windows, and Linux): `~/.chia-vault-recover/lookup-cache.json`. Override with `CHIA_VAULT_RECOVER_CACHE`.
 
 On GUI launch, the last saved vault is loaded so you can Start recovery without searching again. `start --vault` does the same. Run **Look up vault** / `lookup` again to refresh from the chain.
 

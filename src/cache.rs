@@ -105,9 +105,8 @@ impl LookupCache {
                 return PathBuf::from(trimmed);
             }
         }
-        dirs::data_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("chia-vault-recover")
+        home_dir()
+            .join(".chia-vault-recover")
             .join("lookup-cache.json")
     }
 
@@ -272,6 +271,13 @@ fn hint_then_defaults(hint: u64) -> Vec<u64> {
 
 fn cache_key(address: &str) -> String {
     address.trim().to_ascii_lowercase()
+}
+
+fn home_dir() -> PathBuf {
+    std::env::var_os("HOME")
+        .or_else(|| std::env::var_os("USERPROFILE"))
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 fn hex_id(id: &Bytes32) -> String {
@@ -478,6 +484,27 @@ mod tests {
         assert_eq!(last.receive_address, "txch1bbb");
         assert_eq!(last.network, Network::Testnet11);
         let _ = fs::remove_file(path);
+    }
+
+    #[test]
+    fn default_path_uses_dot_dir_under_home() {
+        if std::env::var(CACHE_ENV)
+            .ok()
+            .is_some_and(|value| !value.trim().is_empty())
+        {
+            return;
+        }
+        let path = LookupCache::default_path();
+        assert_eq!(
+            path.file_name().and_then(|name| name.to_str()),
+            Some("lookup-cache.json")
+        );
+        assert_eq!(
+            path.parent()
+                .and_then(|parent| parent.file_name())
+                .and_then(|name| name.to_str()),
+            Some(".chia-vault-recover")
+        );
     }
 
     #[test]
