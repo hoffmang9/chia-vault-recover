@@ -15,13 +15,11 @@ pub mod recovery;
 pub mod vault;
 pub mod workflow;
 
-pub use cache::{
-    CachedClawback, CachedLookup, ConfirmClawback, LookupCache, reconstruct_candidates,
-};
+pub use cache::{CachedLookup, LookupCache};
 pub use config::{Curve, KeyType, VaultConfig, VaultConfigMember};
 pub use discover::{
-    DEFAULT_TIMELOCK_CANDIDATES, DiscoveredCustodyPath, FoundVault, ReconstructedVault,
-    reconstruct, reconstruct_config, reconstruct_from_candidates,
+    ClawbackGuess, DEFAULT_TIMELOCK_CANDIDATES, DiscoveredCustodyPath, FoundVault,
+    ReconstructedVault, check_clawback, reconstruct, reconstruct_config,
 };
 pub use error::Error;
 pub use guidance::{
@@ -40,5 +38,6 @@ pub use recovery::{
 pub use vault::{CustodyPath, VaultInternals, VaultKeys, VaultMemberKey};
 pub use workflow::{
     LookupReport, StartWorkflow, finish as finish_workflow, inspect as inspect_workflow,
-    lookup as lookup_workflow, start as start_workflow,
+    lookup as lookup_workflow, remember_clawback, remember_found, resolve_found,
+    start as start_workflow,
 };

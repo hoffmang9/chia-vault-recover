@@ -9,7 +9,7 @@ use clvm_utils::TreeHash;
 
 use chia_vault_recover::config::VaultConfig;
 use chia_vault_recover::discover::{
-    FoundVault, custody_from_vault_spend, reconstruct, reconstruct_config,
+    ClawbackGuess, FoundVault, custody_from_vault_spend, reconstruct, reconstruct_config,
 };
 use chia_vault_recover::keys::{
     MnemonicWordCount, generate_mnemonic, key_from_mnemonic, public_key_to_hex,
@@ -275,7 +275,7 @@ fn discover_custody_from_previous_spend() -> anyhow::Result<()> {
         current_coin: vault.coin,
         ancestor_puzzle_hashes: vec![ready.full_puzzle_hash],
     };
-    let rebuilt = reconstruct(&found, &recovery_words, None)?;
+    let rebuilt = reconstruct(&found, &recovery_words, ClawbackGuess::Unknown)?;
     assert_eq!(rebuilt.config.recovery.clawback_timelock, 10);
     assert!(rebuilt.found.custody.members_complete());
     assert!(rebuilt.matches_current);

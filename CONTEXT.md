@@ -29,7 +29,7 @@ The public chain facts from a successful lookup: launcher, custody path, current
 _Avoid_: vault-config (that file also has clawback and recovery pubkey)
 
 **Lookup cache**:
-On-disk found vault for a Receive address, shared by GUI and CLI, so a later run can skip lookup.
+The last found vault on disk, shared by GUI and CLI, so a later run can skip lookup.
 _Avoid_: vault-config, session, save file
 
 **Clawback hint**:

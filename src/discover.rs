@@ -20,6 +20,7 @@ use chia_sdk_types::{
 use clvm_traits::FromClvm;
 use clvm_utils::{ToTreeHash, TreeHash};
 use clvmr::{Allocator, NodePtr};
+use serde::{Deserialize, Serialize};
 
 use crate::config::{
     Curve, KeyType, VaultConfig, VaultConfigMember, VaultConfigRecovery, VaultConfigSide,
@@ -33,6 +34,55 @@ use crate::vault::{CustodyPath, SignerSet, VaultMemberKey, get_vault_internals};
 pub const DEFAULT_TIMELOCK_CANDIDATES: &[u64] = &[
     43_200, 86_400, 3_600, 7_200, 21_600, 604_800, 1, 10, 60, 300,
 ];
+
+/// How to choose clawback seconds when reconstructing the public layout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub enum ClawbackGuess {
+    #[default]
+    Unknown,
+    /// User-supplied, not yet matched to the chain.
+    Hint(u64),
+    /// User typed this value, or it already matched the chain.
+    Known(u64),
+}
+
+impl ClawbackGuess {
+    pub fn is_unknown(&self) -> bool {
+        matches!(self, Self::Unknown)
+    }
+
+    pub fn secs(self) -> Option<u64> {
+        match self {
+            Self::Unknown => None,
+            Self::Hint(secs) | Self::Known(secs) => Some(secs),
+        }
+    }
+
+    /// An explicit value is tried alone; otherwise keep the cached guess.
+    pub fn with_typed(self, typed: Option<u64>) -> Self {
+        match typed {
+            Some(secs) => Self::Known(secs),
+            None => self,
+        }
+    }
+
+    pub fn candidates(self) -> Vec<u64> {
+        match self {
+            Self::Unknown => DEFAULT_TIMELOCK_CANDIDATES.to_vec(),
+            Self::Known(secs) => vec![secs],
+            Self::Hint(secs) => {
+                let mut out = vec![secs];
+                for &candidate in DEFAULT_TIMELOCK_CANDIDATES {
+                    if candidate != secs {
+                        out.push(candidate);
+                    }
+                }
+                out
+            }
+        }
+    }
+}
 
 #[derive(Debug, Clone)]
 pub struct DiscoveredCustodyPath {
@@ -161,27 +211,10 @@ pub fn reconstruct_config(
 pub fn reconstruct(
     found: &FoundVault,
     recovery_mnemonic: &str,
-    clawback_timelock: Option<u64>,
+    clawback: ClawbackGuess,
 ) -> Result<ReconstructedVault> {
-    let candidates: Vec<u64> = if let Some(secs) = clawback_timelock {
-        vec![secs]
-    } else {
-        DEFAULT_TIMELOCK_CANDIDATES.to_vec()
-    };
-    reconstruct_from_candidates(found, recovery_mnemonic, &candidates)
-}
-
-/// Try each clawback candidate until the reconstructed puzzle hash matches the chain.
-pub fn reconstruct_from_candidates(
-    found: &FoundVault,
-    recovery_mnemonic: &str,
-    candidates: &[u64],
-) -> Result<ReconstructedVault> {
-    if candidates.is_empty() {
-        return Err(Error::msg("no clawback candidates to try"));
-    }
-
-    for &timelock in candidates {
+    let candidates = clawback.candidates();
+    for &timelock in &candidates {
         let config = reconstruct_config(
             found.launcher_id,
             &found.custody,
@@ -207,6 +240,28 @@ pub fn reconstruct_from_candidates(
          Enter the clawback window explicitly (Cloud Wallet default is 43200)",
         hex::encode(found.custody.custody_hash)
     )))
+}
+
+/// Optional post-lookup check. Phrase is used only in memory.
+pub fn check_clawback(
+    found: &FoundVault,
+    recovery_mnemonic: Option<&str>,
+    clawback_secs: Option<u64>,
+) -> Result<(ClawbackGuess, Option<ReconstructedVault>)> {
+    let words = recovery_mnemonic.map(str::trim).filter(|s| !s.is_empty());
+    match (words, clawback_secs) {
+        (None, None) => Err(Error::msg(
+            "enter a clawback window and/or the recovery phrase to check now, or skip and do this later",
+        )),
+        (None, Some(secs)) => Ok((ClawbackGuess::Hint(secs), None)),
+        (Some(words), secs) => {
+            let rebuilt = reconstruct(found, words, ClawbackGuess::Unknown.with_typed(secs))?;
+            Ok((
+                ClawbackGuess::Known(rebuilt.config.recovery.clawback_timelock),
+                Some(rebuilt),
+            ))
+        }
+    }
 }
 
 pub fn config_matches_puzzle_hash(config: &VaultConfig, puzzle_hash: Bytes32) -> Result<bool> {
@@ -431,5 +486,48 @@ mod tests {
             config.to_vault_keys().unwrap().custody,
             CustodyPath::Hash(_)
         ));
+    }
+
+    #[test]
+    fn clawback_guess_candidates() {
+        assert_eq!(
+            ClawbackGuess::Unknown.candidates(),
+            DEFAULT_TIMELOCK_CANDIDATES
+        );
+        assert_eq!(ClawbackGuess::Known(5).candidates(), vec![5]);
+        assert_eq!(
+            ClawbackGuess::Unknown.with_typed(Some(5)),
+            ClawbackGuess::Known(5)
+        );
+        let hinted = ClawbackGuess::Hint(7).candidates();
+        assert_eq!(hinted[0], 7);
+        assert!(hinted.contains(&43_200));
+    }
+
+    fn dummy_found() -> FoundVault {
+        FoundVault {
+            launcher_id: Bytes32::new([0xaa; 32]),
+            launcher_source: "test".into(),
+            custody: DiscoveredCustodyPath {
+                custody_hash: TreeHash::from(Bytes32::new([0x11; 32])),
+                members: vec![],
+                vault_launcher_ids: vec![],
+            },
+            current_coin: Coin::new(Bytes32::new([0x22; 32]), Bytes32::new([0x33; 32]), 1),
+            ancestor_puzzle_hashes: vec![],
+        }
+    }
+
+    #[test]
+    fn check_clawback_hint_without_phrase() {
+        let (guess, rebuilt) = check_clawback(&dummy_found(), None, Some(43_200)).unwrap();
+        assert_eq!(guess, ClawbackGuess::Hint(43_200));
+        assert!(rebuilt.is_none());
+    }
+
+    #[test]
+    fn check_clawback_requires_something() {
+        let err = check_clawback(&dummy_found(), Some("   "), None).unwrap_err();
+        assert!(err.to_string().contains("later"));
     }
 }

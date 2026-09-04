@@ -6,9 +6,10 @@ use chia_protocol::Coin;
 use chia_puzzle_types::Proof;
 use clvm_utils::TreeHash;
 
+use crate::cache::{CachedLookup, LookupCache};
 use crate::chain::ChainClient;
 use crate::config::VaultConfig;
-use crate::discover::{FoundVault, custody_from_vault_spend};
+use crate::discover::{ClawbackGuess, FoundVault, custody_from_vault_spend};
 use crate::error::{Error, Result};
 use crate::guidance::{KnownLauncher, LookupGap};
 use crate::keys::MnemonicWordCount;
@@ -189,6 +190,47 @@ pub enum LookupReport {
     NeedFallback(LookupGap),
 }
 
+/// Persist a found vault, keeping a clawback guess when the launcher is unchanged.
+pub fn remember_found(
+    cache: &mut LookupCache,
+    address: &str,
+    network: Network,
+    found: FoundVault,
+) -> Result<CachedLookup> {
+    let entry = match cache.matching(address) {
+        Some(existing) => existing.clone().replace_found(address, network, found),
+        None => CachedLookup::new(address, network, found),
+    };
+    cache.store(entry.clone())?;
+    Ok(entry)
+}
+
+pub fn remember_clawback(cache: &mut LookupCache, clawback: ClawbackGuess) -> Result<()> {
+    let Some(entry) = cache.current() else {
+        return Err(Error::msg(
+            "no cached lookup for this address; look up the vault first",
+        ));
+    };
+    cache.store(entry.clone().with_clawback(clawback))
+}
+
+/// Use a cached found vault when the address matches; otherwise look up and persist.
+pub async fn resolve_found(
+    client: &ChainClient,
+    cache: &mut LookupCache,
+    vault: &str,
+    network: Network,
+) -> Result<LookupReport> {
+    if let Some(cached) = cache.matching(vault) {
+        return Ok(LookupReport::Found(cached.found.clone()));
+    }
+    let report = lookup(client, vault).await?;
+    if let LookupReport::Found(found) = &report {
+        remember_found(cache, vault, network, found.clone())?;
+    }
+    Ok(report)
+}
+
 /// Address-first lookup: resolve launcher and a prior custody spend.
 pub async fn lookup(client: &ChainClient, vault: &str) -> Result<LookupReport> {
     let locator = parse_vault_locator(vault)?;
@@ -255,7 +297,8 @@ mod tests {
     use clvm_utils::TreeHash;
 
     use super::*;
-    use crate::discover::DiscoveredCustodyPath;
+    use crate::discover::{ClawbackGuess, DiscoveredCustodyPath};
+    use crate::network::Network;
 
     fn coin() -> Coin {
         Coin::new(Bytes32::new([0x01; 32]), Bytes32::new([0x02; 32]), 1)
@@ -292,6 +335,31 @@ mod tests {
             LookupReport::NeedFallback(LookupGap::NoCustodySpend(_)) => {}
             other => panic!("unexpected {other:?}"),
         }
+    }
+
+    #[test]
+    fn remember_found_keeps_clawback_for_same_launcher() {
+        use crate::cache::LookupCache;
+
+        let path =
+            std::env::temp_dir().join(format!("cvr-workflow-cache-{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        let mut cache = LookupCache::open_at(&path);
+        let found = FoundVault {
+            launcher_id: Bytes32::new([0xaa; 32]),
+            launcher_source: "test".into(),
+            custody: custody(),
+            current_coin: coin(),
+            ancestor_puzzle_hashes: vec![],
+        };
+        remember_found(&mut cache, "xch1abc", Network::Mainnet, found.clone()).unwrap();
+        remember_clawback(&mut cache, ClawbackGuess::Known(43_200)).unwrap();
+        remember_found(&mut cache, "xch1abc", Network::Mainnet, found).unwrap();
+        assert_eq!(
+            cache.current().unwrap().clawback,
+            ClawbackGuess::Known(43_200)
+        );
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]
