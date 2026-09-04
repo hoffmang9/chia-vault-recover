@@ -1181,7 +1181,7 @@ dependencies = [
  "chia-sdk-test",
  "chia-sdk-types",
  "chia-secp",
- "chia-sha2 0.36.1",
+ "chia-sha2 0.42.1",
  "clap",
  "clvm-traits 0.36.1",
  "clvm-utils",
