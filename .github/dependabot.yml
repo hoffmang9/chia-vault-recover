@@ -10,6 +10,29 @@ updates:
           - "chia-*"
           - "clvm-*"
           - "clvmr"
+    # chia-wallet-sdk 0.36 still pins chia_rs 0.36 / clvmr 0.16.
+    # Ignore family bumps until a matching SDK release exists.
+    ignore:
+      - dependency-name: "chia-bls"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "chia-consensus"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "chia-protocol"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "chia-puzzle-types"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "chia-secp"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "chia-sha2"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "chia-puzzles"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "clvm-traits"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "clvm-utils"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
+      - dependency-name: "clvmr"
+        update-types: ["version-update:semver-major", "version-update:semver-minor"]
   - package-ecosystem: github-actions
     directory: /
     schedule:
