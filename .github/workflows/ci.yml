@@ -50,6 +50,10 @@ jobs:
     name: Build (${{ matrix.name }})
     needs: [lint, test]
     runs-on: ${{ matrix.os }}
+    # Repo default token is read-only; attaching files to a published release
+    # needs contents:write (softprops/action-gh-release updates the release).
+    permissions:
+      contents: write
     strategy:
       fail-fast: false
       matrix:
