@@ -181,8 +181,8 @@ pub async fn finish(
 
 /// Result of looking up a vault from its receive address (or launcher id).
 ///
-/// This is chain facts only. Rebuild the public layout with
-/// [`crate::discover::reconstruct`].
+/// This is chain facts only. Rebuild the public layout at Start with
+/// [`crate::discover::reconstruct`], then [`start`].
 #[derive(Debug, Clone)]
 pub enum LookupReport {
     Found(FoundVault),

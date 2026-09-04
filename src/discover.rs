@@ -3,8 +3,8 @@
 //! Cloud Wallet never hints the full vault config on-chain. A custody spend of the
 //! current 1-of-2 inner puzzle *does* reveal that path: the One-of-N member puzzle
 //! hashes to `custody_hash`, and a 1-of-1 member also reveals the public key.
-//! Combined with the recovery seed and clawback timelock we can rebuild a config
-//! that matches the singleton.
+//! Combined with the recovery seed and clawback timelock (known or tried from
+//! common Cloud Wallet values) we can rebuild a config that matches the singleton.
 
 use chia_protocol::{Bytes32, Coin, CoinSpend};
 use chia_puzzles::{FORCE_1_OF_2_W_RESTRICTED_VARIABLE_HASH, ONE_OF_N_HASH, RESTRICTIONS_HASH};

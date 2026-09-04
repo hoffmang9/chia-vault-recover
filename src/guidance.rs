@@ -48,7 +48,7 @@ impl LookupGap {
             }
             Self::NoCustodySpend(_) => {
                 "Recovery-only spends are not enough. A send that uses the vault’s \
-                 passkey (custody) publishes the layout this tool needs."
+                 passkey or Chia Signer App (custody) publishes the layout this tool needs."
             }
         }
     }
@@ -73,8 +73,9 @@ If you can still open this vault at https://vault.chia.net:
 
 1. Preferred — send any amount from the vault back to the same Receive address \
 (or any address you control). A self-send is enough. Cloud Wallet spends the vault \
-singleton with your passkey, which publishes the launcher id and custody path. \
-Wait until that transaction confirms, then look up the same address again.
+singleton with your passkey or the Chia Signer App, which publishes the launcher \
+id and custody path. Wait until that transaction confirms, then look up the same \
+address again.
 
 2. Or download the public vault-config JSON without sending: while logged in, \
 open DevTools → Console (macOS: Option-Command-J; Windows/Linux: Ctrl+Shift+J), \
@@ -86,9 +87,17 @@ If you cannot access Cloud Wallet, you need a vault-config-*.json you saved earl
 pub const LOOKUP_SUCCESS_NO_JSON: &str =
     "Vault layout rebuilt from chain. You do not need a vault-config-*.json download.";
 
-pub const LOOKUP_READY_FOR_PHRASE: &str = "\
-Launcher and custody path are on chain. You do not need a vault-config-*.json download. \
-Enter the Cloud Wallet recovery phrase to rebuild the public layout and continue.";
+/// Address-only lookup succeeded. Recovery words are not needed until Start.
+pub const LOOKUP_CAN_RECOVER: &str = "\
+This vault can be recovered. You do not need a vault-config-*.json download. \
+The recovery phrase is only needed when you Start recovery — you can close the \
+app now and come back later.";
+
+/// Optional current-vault clawback seconds (Start only).
+pub const CLAWBACK_SECS_HELP: &str = "\
+If you know this vault’s clawback timelock in seconds, enter it. Otherwise leave \
+it empty; the app tries common Cloud Wallet values (including 43200 / 12 hours) \
+until the reconstructed spend matches the chain.";
 
 pub fn reconstruct_success_guidance(matches_current: bool) -> String {
     let note = if matches_current {
@@ -122,6 +131,13 @@ mod tests {
             assert!(text.contains("download-vault-config.js"), "{gap:?}");
             assert!(text.contains("vault.chia.net"), "{gap:?}");
         }
+    }
+
+    #[test]
+    fn lookup_can_recover_does_not_ask_for_phrase() {
+        assert!(LOOKUP_CAN_RECOVER.contains("Start recovery"));
+        assert!(!LOOKUP_CAN_RECOVER.contains("look up again"));
+        assert!(CLAWBACK_SECS_HELP.contains("43200"));
     }
 
     #[test]
