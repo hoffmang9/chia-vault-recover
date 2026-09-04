@@ -35,7 +35,7 @@ chia-sdk-coinset = { version = "0.34", features = ["rustls"] }
 chia-sdk-driver = "0.34"
 chia-sdk-types = "0.34"
 chia-secp = "0.36"
-chia-sha2 = "0.36"
+chia-sha2 = "0.42"
 clap = { version = "4", features = ["derive", "env"] }
 clvm-traits = "0.36"
 clvm-utils = "0.36"
