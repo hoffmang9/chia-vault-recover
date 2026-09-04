@@ -39,7 +39,7 @@ chia-sha2 = "0.42"
 clap = { version = "4", features = ["derive", "env"] }
 clvm-traits = "0.36"
 clvm-utils = "0.36"
-clvmr = "0.16"
+clvmr = "0.19"
 eframe = { version = "0.31", default-features = true }
 egui = "0.36"
 hex = "0.4"
