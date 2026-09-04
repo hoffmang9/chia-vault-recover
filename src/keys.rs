@@ -6,7 +6,7 @@
 
 use bip39::{Language, Mnemonic};
 use chia_bls::{PublicKey, SecretKey, Signature, sign};
-use rand::RngCore;
+use rand::Rng;
 
 use crate::error::{Error, Result};
 
@@ -52,7 +52,7 @@ pub fn key_from_mnemonic(mnemonic: &str) -> Result<KeyPair> {
 /// Generate a new mnemonic (default 24 words) and its Cloud Wallet–style key pair.
 pub fn generate_mnemonic(word_count: MnemonicWordCount) -> Result<GeneratedMnemonic> {
     let mut entropy = vec![0u8; word_count.entropy_bytes()];
-    rand::thread_rng().fill_bytes(&mut entropy);
+    rand::rng().fill_bytes(&mut entropy);
     let mnemonic = Mnemonic::from_entropy_in(Language::English, &entropy)?;
     let words = mnemonic.to_string();
     let key_pair = key_from_mnemonic(&words)?;
