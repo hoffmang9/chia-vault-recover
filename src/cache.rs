@@ -64,7 +64,7 @@ impl CachedLookup {
 }
 
 /// True when two receive addresses name the same vault (trim + case).
-pub fn addresses_match(left: &str, right: &str) -> bool {
+fn addresses_match(left: &str, right: &str) -> bool {
     cache_key(left) == cache_key(right)
 }
 

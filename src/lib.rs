@@ -15,7 +15,7 @@ pub mod recovery;
 pub mod vault;
 pub mod workflow;
 
-pub use cache::{CachedLookup, LookupCache, addresses_match};
+pub use cache::{CachedLookup, LookupCache};
 pub use config::{Curve, KeyType, VaultConfig, VaultConfigMember};
 pub use discover::{
     ClawbackCheck, ClawbackGuess, DEFAULT_TIMELOCK_CANDIDATES, DiscoveredCustodyPath, FoundVault,

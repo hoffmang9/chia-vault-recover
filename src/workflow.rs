@@ -192,63 +192,55 @@ pub enum LookupReport {
     NeedFallback(LookupGap),
 }
 
-fn cached_entry(
-    cache: &LookupCache,
-    address: &str,
-    network: Network,
-    found: FoundVault,
-) -> CachedLookup {
-    match cache.matching(address) {
-        Some(existing) => existing.clone().replace_found(address, network, found),
-        None => CachedLookup::new(address, network, found),
-    }
+fn require_cached(cache: &LookupCache, address: &str) -> Result<CachedLookup> {
+    cache
+        .matching(address)
+        .cloned()
+        .ok_or_else(|| Error::msg("no cached lookup for this address; look up the vault first"))
 }
 
-/// Persist a found vault, keeping a clawback guess when the launcher is unchanged.
+/// Bind identity. Keeps a clawback guess when the launcher is unchanged.
 pub fn persist_found(
     cache: &mut LookupCache,
     address: &str,
     network: Network,
     found: FoundVault,
 ) -> Result<CachedLookup> {
-    let entry = cached_entry(cache, address, network, found);
+    let entry = match cache.matching(address) {
+        Some(existing) => existing.clone().replace_found(address, network, found),
+        None => CachedLookup::new(address, network, found),
+    };
     cache.store(entry.clone())?;
     Ok(entry)
 }
 
-/// Persist found vault + clawback for this address in one write.
+/// Update clawback on the matching entry. Will not create or rebind a vault.
 pub fn persist_guess(
     cache: &mut LookupCache,
     address: &str,
-    network: Network,
-    found: FoundVault,
     clawback: ClawbackGuess,
 ) -> Result<CachedLookup> {
-    let entry = cached_entry(cache, address, network, found).with_clawback(clawback);
+    let entry = require_cached(cache, address)?.with_clawback(clawback);
     cache.store(entry.clone())?;
     Ok(entry)
 }
 
-/// Rebuild the public layout and persist the verified clawback.
+/// Rebuild the public layout from the cached vault and persist the verified clawback.
 pub fn rebuild_for_start(
     cache: &mut LookupCache,
     address: &str,
-    network: Network,
-    found: FoundVault,
     recovery_mnemonic: &str,
     typed_clawback: Option<u64>,
 ) -> Result<ReconstructedVault> {
-    let guess = cache
-        .matching(address)
-        .map(|entry| entry.clawback)
-        .unwrap_or_default()
-        .with_typed(typed_clawback);
-    let rebuilt = reconstruct(&found, recovery_mnemonic, guess)?;
+    let entry = require_cached(cache, address)?;
+    let rebuilt = reconstruct(
+        &entry.found,
+        recovery_mnemonic,
+        entry.clawback.with_typed(typed_clawback),
+    )?;
     persist_guess(
         cache,
         address,
-        network,
-        found,
         ClawbackGuess::Known(rebuilt.config.recovery.clawback_timelock),
     )?;
     Ok(rebuilt)
@@ -337,6 +329,7 @@ mod tests {
     use clvm_utils::TreeHash;
 
     use super::*;
+    use crate::cache::LookupCache;
     use crate::discover::{ClawbackGuess, DiscoveredCustodyPath};
     use crate::network::Network;
 
@@ -379,8 +372,6 @@ mod tests {
 
     #[test]
     fn persist_found_keeps_clawback_for_same_launcher() {
-        use crate::cache::LookupCache;
-
         let path =
             std::env::temp_dir().join(format!("cvr-workflow-cache-{}.json", std::process::id()));
         let _ = std::fs::remove_file(&path);
@@ -393,19 +384,55 @@ mod tests {
             ancestor_puzzle_hashes: vec![],
         };
         persist_found(&mut cache, "xch1abc", Network::Mainnet, found.clone()).unwrap();
-        persist_guess(
-            &mut cache,
-            "xch1abc",
-            Network::Mainnet,
-            found.clone(),
-            ClawbackGuess::Known(43_200),
-        )
-        .unwrap();
+        persist_guess(&mut cache, "xch1abc", ClawbackGuess::Known(43_200)).unwrap();
         persist_found(&mut cache, "xch1abc", Network::Mainnet, found).unwrap();
         assert_eq!(
             cache.current().unwrap().clawback,
             ClawbackGuess::Known(43_200)
         );
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn persist_guess_refuses_unbound_address() {
+        let path = std::env::temp_dir().join(format!(
+            "cvr-workflow-unbound-{}-{}.json",
+            std::process::id(),
+            "guess"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut cache = LookupCache::open_at(&path);
+        persist_found(
+            &mut cache,
+            "xch1abc",
+            Network::Mainnet,
+            FoundVault {
+                launcher_id: Bytes32::new([0xaa; 32]),
+                launcher_source: "test".into(),
+                custody: custody(),
+                current_coin: coin(),
+                ancestor_puzzle_hashes: vec![],
+            },
+        )
+        .unwrap();
+        let err = persist_guess(&mut cache, "xch1other", ClawbackGuess::Hint(1)).unwrap_err();
+        assert!(err.to_string().contains("look up"));
+        assert!(cache.matching("xch1other").is_none());
+        assert_eq!(cache.current().unwrap().receive_address, "xch1abc");
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn rebuild_for_start_requires_cached_vault() {
+        let path = std::env::temp_dir().join(format!(
+            "cvr-workflow-unbound-{}-{}.json",
+            std::process::id(),
+            "rebuild"
+        ));
+        let _ = std::fs::remove_file(&path);
+        let mut cache = LookupCache::open_at(&path);
+        let err = rebuild_for_start(&mut cache, "xch1abc", "abandon abandon", None).unwrap_err();
+        assert!(err.to_string().contains("look up"));
         let _ = std::fs::remove_file(path);
     }
 

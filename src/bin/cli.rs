@@ -178,13 +178,7 @@ async fn main() -> Result<()> {
                     if clawback_secs.is_some() || words.is_some() {
                         match check_clawback(&found, words.as_deref(), clawback_secs) {
                             Ok(check) => {
-                                workflow::persist_guess(
-                                    &mut cache,
-                                    &vault,
-                                    network,
-                                    found.clone(),
-                                    check.guess(),
-                                )?;
+                                workflow::persist_guess(&mut cache, &vault, check.guess())?;
                                 match check {
                                     ClawbackCheck::Hint(secs) => {
                                         println!(
@@ -260,7 +254,7 @@ async fn main() -> Result<()> {
                     let (client, network) = client_for(&vault, network, backend)?;
                     let mut cache = LookupCache::open();
                     let from_cache = cache.matching(&vault).is_some();
-                    let found = require_found(
+                    require_found(
                         network,
                         workflow::resolve_found(&client, &mut cache, &vault, network).await?,
                     )?;
@@ -275,8 +269,6 @@ async fn main() -> Result<()> {
                     let rebuilt = workflow::rebuild_for_start(
                         &mut cache,
                         &vault,
-                        network,
-                        found,
                         &recovery_mnemonic,
                         clawback_secs,
                     )?;
