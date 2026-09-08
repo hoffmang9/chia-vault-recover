@@ -253,3 +253,19 @@ Every green CI uploads release binaries for:
 - Linux `x86_64` and `aarch64`
 
 GitHub Release tags (`v*`) also attach those artifacts to the release.
+
+### macOS Gatekeeper
+
+Release macOS binaries are not Apple-signed or notarized. After a download, double-clicking `chia-vault-recover-gui-macos-universal` (or the CLI binary) shows *Apple could not verify … is free of malware* with **Move to Trash** / **Done**. That is expected.
+
+**Settings (matches that dialog):** click **Done**, then System Settings → Privacy & Security → scroll to Security → **Open Anyway** for the blocked file. Confirm the next prompt.
+
+**Terminal** (GUI or CLI; use the path where you saved the download):
+
+```bash
+xattr -d com.apple.quarantine chia-vault-recover-gui-macos-universal
+chmod +x chia-vault-recover-gui-macos-universal
+./chia-vault-recover-gui-macos-universal
+```
+
+Same `xattr` / `chmod` for `chia-vault-recover-macos-universal`. A local `cargo build --release` is not quarantined. Control-click → Open does not clear the Sequoia/Tahoe dialog.
