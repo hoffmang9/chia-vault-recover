@@ -2,6 +2,7 @@
 
 use std::path::Path;
 
+use chia_vault_recover::LookupGap;
 use chia_vault_recover::config::VaultConfig;
 use chia_vault_recover::discover::{ClawbackCheck, FoundVault, check_clawback};
 use chia_vault_recover::error::Result;
@@ -10,7 +11,6 @@ use chia_vault_recover::locate::client_for_vault;
 use chia_vault_recover::network::Network;
 use chia_vault_recover::recovery::VaultPhase;
 use chia_vault_recover::workflow::{self, LookupReport, StartWorkflow};
-use chia_vault_recover::LookupGap;
 
 use crate::session::GuiSession;
 
@@ -252,7 +252,10 @@ impl App {
 
     fn finish_inner(&mut self) -> Result<()> {
         let (config_path, post_path) = match &self.phase {
-            Phase::Wait(session) => (session.config_path.clone(), session.post_recovery_path.clone()),
+            Phase::Wait(session) => (
+                session.config_path.clone(),
+                session.post_recovery_path.clone(),
+            ),
             _ => {
                 return Err(chia_vault_recover::Error::msg(
                     "finish is only available after Start recovery",

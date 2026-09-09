@@ -28,10 +28,18 @@ fn bump_text(style: &mut Style) {
     use FontFamily::Proportional;
     use TextStyle::*;
 
-    style.text_styles.insert(Heading, FontId::new(24.0, Proportional));
-    style.text_styles.insert(Body, FontId::new(15.0, Proportional));
-    style.text_styles.insert(Button, FontId::new(15.0, Proportional));
-    style.text_styles.insert(Small, FontId::new(13.0, Proportional));
+    style
+        .text_styles
+        .insert(Heading, FontId::new(24.0, Proportional));
+    style
+        .text_styles
+        .insert(Body, FontId::new(15.0, Proportional));
+    style
+        .text_styles
+        .insert(Button, FontId::new(15.0, Proportional));
+    style
+        .text_styles
+        .insert(Small, FontId::new(13.0, Proportional));
     style
         .text_styles
         .insert(Monospace, FontId::new(13.0, FontFamily::Monospace));

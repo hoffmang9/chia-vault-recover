@@ -189,7 +189,10 @@ impl App {
     fn chain_client(&self) -> Result<(ChainClient, Network)> {
         let vault = self.receive_address();
         if vault.is_empty() {
-            Ok((ChainClient::new(self.network, &self.backend()), self.network))
+            Ok((
+                ChainClient::new(self.network, &self.backend()),
+                self.network,
+            ))
         } else {
             client_for_vault(vault, self.network, &self.backend())
         }
