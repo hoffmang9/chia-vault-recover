@@ -1,9 +1,9 @@
 //! Wizard screen drawing.
 
 use chia_vault_recover::guidance::{CLAWBACK_SECS_HELP, OPTIONAL_CONFIRM_HELP, fallback_guidance};
-use eframe::egui::{self, RichText};
+use eframe::egui;
 
-use crate::theme::{self, DANGER, secondary_button};
+use crate::theme::{self, DANGER, muted, muted_small, secondary_button};
 
 use super::{App, Phase};
 
@@ -40,13 +40,9 @@ impl App {
             ui.text_edit_singleline(&mut self.full_node_url);
             ui.add_space(6.0);
             ui.label("Already have a vault-config JSON?");
-            ui.label(
-                RichText::new(
-                    "Only needed if lookup says the chain does not yet show this vault’s layout.",
-                )
-                .small()
-                .weak(),
-            );
+            ui.label(muted_small(
+                "Only needed if lookup says the chain does not yet show this vault’s layout.",
+            ));
             Self::path_row(ui, &mut self.config_path);
             if secondary_button(ui, "Load config").clicked() {
                 self.load_existing_config();
@@ -91,21 +87,14 @@ impl App {
         let can_start = self.can_start();
         theme::card_frame(ui).show(ui, |ui| {
             if !can_start {
-                ui.label(
-                    RichText::new(
-                        "Look up a vault or load a vault-config JSON before starting recovery.",
-                    )
-                    .weak(),
-                );
+                ui.label(muted(
+                    "Look up a vault or load a vault-config JSON before starting recovery.",
+                ));
                 ui.add_space(6.0);
             } else if self.cached_vault().is_some() {
-                ui.label(
-                    RichText::new(
-                        "Optional: check clawback now, or enter it when you start. The recovery phrase is never written to disk.",
-                    )
-                    .small()
-                    .weak(),
-                );
+                ui.label(muted(
+                    "Optional: check clawback now, or enter it when you start. The recovery phrase is never written to disk.",
+                ));
             }
 
             ui.label("Cloud Wallet recovery passphrase");

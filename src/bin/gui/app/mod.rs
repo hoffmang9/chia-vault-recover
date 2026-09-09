@@ -13,7 +13,7 @@ use chia_vault_recover::error::Result;
 use chia_vault_recover::locate::client_for_vault;
 use chia_vault_recover::network::{Backend, Network};
 use chia_vault_recover::{LookupGap, app_dir};
-use eframe::egui::{self, RichText};
+use eframe::egui;
 
 use crate::session::GuiSession;
 use crate::theme;
@@ -335,7 +335,7 @@ impl eframe::App for App {
         egui::CentralPanel::default().show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.heading("Chia Vault Recover");
-                ui.label(RichText::new(self.subtitle()).weak());
+                ui.label(theme::muted(self.subtitle()));
                 ui.add_space(6.0);
                 self.draw_step_rail(ui);
                 ui.add_space(8.0);

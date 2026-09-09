@@ -5,7 +5,7 @@ use chia_vault_recover::network::Network;
 use eframe::egui::{self, RichText};
 
 use crate::session::GuiSession;
-use crate::theme::{self, primary_button, secondary_button};
+use crate::theme::{self, muted, muted_small, primary_button, secondary_button};
 
 use super::{App, RailStep};
 
@@ -80,14 +80,9 @@ impl App {
     pub(super) fn network_toggle(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.label("Network:");
-            let mainnet = matches!(self.network, Network::Mainnet);
-            if ui.selectable_label(mainnet, "Mainnet").clicked() {
-                self.network = Network::Mainnet;
-            }
-            if ui.selectable_label(!mainnet, "Testnet11").clicked() {
-                self.network = Network::Testnet11;
-            }
-            ui.label(RichText::new("(xch1 / txch1 overrides)").small().weak());
+            ui.radio_value(&mut self.network, Network::Mainnet, "Mainnet");
+            ui.radio_value(&mut self.network, Network::Testnet11, "Testnet11");
+            ui.label(muted_small("(xch1 / txch1 overrides)"));
         });
     }
 
@@ -104,11 +99,9 @@ impl App {
                     "Clawback window: about {} remaining.",
                     format_duration(remaining as u64)
                 ));
-                ui.label(
-                    RichText::new("Old custody can still cancel recovery until this ends.")
-                        .small()
-                        .weak(),
-                );
+                ui.label(muted(
+                    "Old custody can still cancel recovery until this ends.",
+                ));
             } else {
                 ui.colored_label(
                     theme::CHIA_GREEN,

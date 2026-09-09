@@ -39,18 +39,40 @@ fn bump_text(style: &mut Style) {
 
 fn accented(mut visuals: Visuals) -> Visuals {
     visuals.selection.bg_fill = CHIA_GREEN;
-    visuals.selection.stroke = Stroke::new(1.0, CHIA_GREEN);
+    // Selected text must contrast with the green fill (was green-on-green).
+    visuals.selection.stroke = Stroke::new(1.0, Color32::WHITE);
     visuals.hyperlink_color = CHIA_GREEN;
+    // Default weak text (~60% alpha) disappears on light cards; keep secondary copy readable.
+    visuals.weak_text_alpha = 0.88;
+    visuals.weak_text_color = Some(if visuals.dark_mode {
+        Color32::from_rgb(0xB8, 0xC0, 0xC8)
+    } else {
+        Color32::from_rgb(0x3D, 0x47, 0x54)
+    });
     visuals.widgets.active.bg_fill = CHIA_GREEN_ACTIVE;
     visuals.widgets.hovered.bg_fill = if visuals.dark_mode {
         Color32::from_rgb(0x2A, 0x3A, 0x30)
     } else {
         Color32::from_rgb(0xE8, 0xF5, 0xEC)
     };
-    visuals.widgets.open.bg_fill = CHIA_GREEN;
+    visuals.widgets.open.bg_fill = if visuals.dark_mode {
+        Color32::from_rgb(0x2A, 0x3A, 0x30)
+    } else {
+        Color32::from_rgb(0xE8, 0xF5, 0xEC)
+    };
     visuals.window_corner_radius = CornerRadius::same(8);
     visuals.menu_corner_radius = CornerRadius::same(8);
     visuals
+}
+
+/// Secondary / explanatory copy — uses theme weak color (tuned for contrast).
+pub fn muted(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).weak()
+}
+
+/// Small secondary hint text.
+pub fn muted_small(text: impl Into<String>) -> egui::RichText {
+    egui::RichText::new(text).small().weak()
 }
 
 /// Filled primary action (Start / Finish / Look up).
