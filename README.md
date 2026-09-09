@@ -22,11 +22,13 @@ You also need network access (coinset by default, or a full node) to find the va
 chia-vault-recover-gui
 ```
 
-1. Paste the vault Receive address and click **Look up vault**. This does not ask for the recovery phrase. A successful lookup is saved on disk (see [Lookup cache](#lookup-cache)). You can close the app and come back later; the next launch skips the chain search.
+The GUI is a short wizard: **Look up → Start → Finish**. Only one step is on screen at a time.
+
+1. **Look up** — Paste the vault Receive address and click **Look up vault**. This does not ask for the recovery phrase. A successful lookup is saved on disk (see [Lookup cache](#lookup-cache)). Advanced options (full node URL, vault-config JSON) are collapsed until needed.
 2. If lookup asks for a self-send or a vault-config, follow the on-screen steps (same as the CLI notes below).
-3. Optionally enter the clawback window and/or recovery phrase and click **Check clawback now**. This is not required. Without the phrase, a typed clawback is saved only as a hint. With the phrase, a matching clawback is saved as verified. The phrase is never written to disk.
-4. When you are ready to start, paste the recovery phrase (if you have not already) and a new custody mnemonic, then **Start recovery**. If you know the clawback window in seconds, enter it; otherwise the app uses a verified cache value, then a hint, then common Cloud Wallet values (including 43200 / 12 hours) until the spend matches the chain.
-5. After the clawback window, **Finish recovery**.
+3. **Start** — Optionally enter the clawback window and/or recovery phrase and click **Check clawback now**. This is not required. Paste the recovery phrase and a new custody mnemonic, then **Start recovery**. Public configs are written under `~/.chia-vault-recover/` by default (override with Browse).
+4. You can **close the app** after lookup or after Start. The next launch skips any home screen and opens **Start** (saved lookup) or **Finish** (recovery already started).
+5. **Finish** — After the clawback window, click **Finish recovery**. Remaining time is shown when Start was recorded in this app.
 
 `xch1…` / `txch1…` selects mainnet or testnet11 automatically.
 
@@ -199,9 +201,14 @@ No `m/12381/8444/...` path. Matches Cloud Wallet `bls.ts`.
 
 A successful lookup writes the public chain facts (launcher, custody path, current coin, ancestor puzzle hashes) to a JSON file shared by the GUI and CLI. The recovery phrase is never stored.
 
-Default path (macOS, Windows, and Linux): `~/.chia-vault-recover/lookup-cache.json`. Override with `CHIA_VAULT_RECOVER_CACHE`.
+Default path (macOS, Windows, and Linux): `~/.chia-vault-recover/lookup-cache.json`.
 
-On GUI launch, the last saved vault is loaded so you can Start recovery without searching again. `start --vault` does the same. Run **Look up vault** / `lookup` again to refresh from the chain.
+- `CHIA_VAULT_RECOVER_DIR` — app data directory (cache, GUI session, default vault-config paths). Default: `~/.chia-vault-recover`.
+- `CHIA_VAULT_RECOVER_CACHE` — lookup-cache file path only. Default: `$CHIA_VAULT_RECOVER_DIR/lookup-cache.json` (or `~/.chia-vault-recover/lookup-cache.json`).
+
+The GUI stores public vault-config / post-recovery-config files in that same directory by default, plus a small `gui-session.json` (paths and Start time only — never mnemonics) so Finish works after relaunch.
+
+On GUI launch, the last saved vault opens on **Start** (or **Finish** if recovery was already started). Run **Look up vault** again to refresh from the chain, or use **Look up a different vault** to clear the GUI session.
 
 A clawback value is stored only when you supply one:
 

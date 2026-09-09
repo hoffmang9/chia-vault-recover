@@ -19,6 +19,23 @@ use crate::error::{Error, Result};
 use crate::network::Network;
 
 const CACHE_ENV: &str = "CHIA_VAULT_RECOVER_CACHE";
+const DIR_ENV: &str = "CHIA_VAULT_RECOVER_DIR";
+
+/// Directory for the lookup cache, GUI session, and default vault-config files.
+///
+/// Override with `CHIA_VAULT_RECOVER_DIR`. Otherwise `~/.chia-vault-recover`
+/// (or `.chia-vault-recover` under the process home fallback).
+///
+/// Independent of [`CACHE_ENV`], which only relocates the lookup-cache file.
+pub fn app_dir() -> PathBuf {
+    if let Ok(path) = std::env::var(DIR_ENV) {
+        let trimmed = path.trim();
+        if !trimmed.is_empty() {
+            return PathBuf::from(trimmed);
+        }
+    }
+    home_dir().join(".chia-vault-recover")
+}
 
 /// The last successful lookup, plus an optional clawback guess.
 #[derive(Debug, Clone)]
@@ -106,9 +123,7 @@ impl LookupCache {
                 return PathBuf::from(trimmed);
             }
         }
-        home_dir()
-            .join(".chia-vault-recover")
-            .join("lookup-cache.json")
+        app_dir().join("lookup-cache.json")
     }
 
     pub fn open() -> Self {
@@ -396,6 +411,9 @@ mod tests {
         if std::env::var(CACHE_ENV)
             .ok()
             .is_some_and(|value| !value.trim().is_empty())
+            || std::env::var(DIR_ENV)
+                .ok()
+                .is_some_and(|value| !value.trim().is_empty())
         {
             return;
         }
@@ -410,5 +428,6 @@ mod tests {
                 .and_then(|name| name.to_str()),
             Some(".chia-vault-recover")
         );
+        assert_eq!(path.parent().map(PathBuf::from), Some(app_dir()));
     }
 }

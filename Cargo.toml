@@ -20,7 +20,7 @@ path = "src/bin/cli.rs"
 
 [[bin]]
 name = "chia-vault-recover-gui"
-path = "src/bin/gui.rs"
+path = "src/bin/gui/main.rs"
 
 [dependencies]
 anyhow = "1"
