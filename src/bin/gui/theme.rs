@@ -1,6 +1,8 @@
 //! System light/dark theme with Chia green accents.
 
-use eframe::egui::{self, Color32, CornerRadius, Stroke, Style, Theme, Visuals};
+use eframe::egui::{
+    self, Color32, CornerRadius, FontFamily, FontId, Stroke, Style, TextStyle, Theme, Visuals,
+};
 
 /// Chia brand green (approx. #3AAC59).
 pub const CHIA_GREEN: Color32 = Color32::from_rgb(0x3A, 0xAC, 0x59);
@@ -22,11 +24,10 @@ pub fn apply(ctx: &egui::Context) {
     });
 }
 
-use egui::FontFamily::{self, Proportional};
-use egui::FontId;
-use egui::TextStyle::*;
-
 fn bump_text(style: &mut Style) {
+    use FontFamily::Proportional;
+    use TextStyle::*;
+
     style.text_styles.insert(Heading, FontId::new(24.0, Proportional));
     style.text_styles.insert(Body, FontId::new(15.0, Proportional));
     style.text_styles.insert(Button, FontId::new(15.0, Proportional));

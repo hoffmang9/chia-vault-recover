@@ -2,12 +2,14 @@
 
 mod actions;
 mod screens;
+mod widgets;
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use chia_vault_recover::cache::{CachedLookup, LookupCache};
 use chia_vault_recover::chain::ChainClient;
+use chia_vault_recover::error::Result;
 use chia_vault_recover::locate::client_for_vault;
 use chia_vault_recover::network::{Backend, Network};
 use chia_vault_recover::{LookupGap, app_dir};
@@ -42,7 +44,7 @@ enum RailStep {
     Finish,
 }
 
-/// Exclusive wizard phase. Waiting owns the on-disk session; no parallel `has_config` flag.
+/// Exclusive wizard phase. Waiting owns the on-disk session.
 #[derive(Debug, Clone)]
 enum Phase {
     Lookup,
@@ -50,6 +52,31 @@ enum Phase {
     Start,
     Wait(GuiSession),
     Done,
+}
+
+#[derive(Debug, Clone, Default)]
+enum Status {
+    #[default]
+    Empty,
+    Ok(String),
+    Err(String),
+}
+
+impl Status {
+    fn text(&self) -> &str {
+        match self {
+            Self::Empty => "",
+            Self::Ok(s) | Self::Err(s) => s,
+        }
+    }
+
+    fn is_error(&self) -> bool {
+        matches!(self, Self::Err(_))
+    }
+
+    fn is_empty(&self) -> bool {
+        matches!(self, Self::Empty)
+    }
 }
 
 pub struct App {
@@ -61,10 +88,9 @@ pub struct App {
     new_custody_mnemonic: String,
     new_recovery_mnemonic: String,
     generate_12_words: bool,
-    network_mainnet: bool,
+    network: Network,
     full_node_url: String,
-    status: String,
-    status_is_error: bool,
+    status: Status,
     generated_recovery_mnemonic: Option<String>,
     phase: Phase,
     /// Last inspect / wait guidance (collapsible Details).
@@ -91,10 +117,9 @@ impl App {
             new_custody_mnemonic: String::new(),
             new_recovery_mnemonic: String::new(),
             generate_12_words: false,
-            network_mainnet: true,
+            network: Network::Mainnet,
             full_node_url: String::new(),
-            status: String::new(),
-            status_is_error: false,
+            status: Status::Empty,
             generated_recovery_mnemonic: None,
             phase: Phase::Lookup,
             detail: String::new(),
@@ -110,7 +135,11 @@ impl App {
             && session_files_ready(&session)
             && session_matches_cache(&self.cache, &session.receive_address)
         {
-            self.apply_session_fields(&session);
+            // Address/network for chain calls; paths live only on Phase::Wait(session).
+            self.vault_address = session.receive_address.clone();
+            if let Some(entry) = self.cache.matching(&session.receive_address) {
+                self.network = entry.network;
+            }
             self.set_ok(
                 "Resumed an in-progress recovery. Wait for the clawback window, then Finish.",
             );
@@ -123,7 +152,7 @@ impl App {
             if let Some(secs) = entry.clawback.secs() {
                 self.clawback_secs = secs.to_string();
             }
-            self.network_mainnet = matches!(entry.network, Network::Mainnet);
+            self.network = entry.network;
             self.phase = Phase::Start;
             self.set_ok(format!(
                 "Loaded a saved lookup. Chain search was skipped. Cache: {}.",
@@ -132,33 +161,17 @@ impl App {
         }
     }
 
-    fn apply_session_fields(&mut self, session: &GuiSession) {
-        self.vault_address = session.receive_address.clone();
-        self.config_path = session.config_path.clone();
-        self.post_recovery_path = session.post_recovery_path.clone();
-        if let Some(secs) = session.clawback_secs {
-            self.clawback_secs = secs.to_string();
-        }
-        if let Some(entry) = self.cache.matching(&self.vault_address) {
-            self.network_mainnet = matches!(entry.network, Network::Mainnet);
-        }
-    }
-
     fn set_ok(&mut self, message: impl Into<String>) {
-        self.status = message.into();
-        self.status_is_error = false;
+        self.status = Status::Ok(message.into());
     }
 
     fn set_err(&mut self, message: impl Into<String>) {
-        self.status = message.into();
-        self.status_is_error = true;
+        self.status = Status::Err(message.into());
     }
 
-    fn network(&self) -> Network {
-        if self.network_mainnet {
-            Network::Mainnet
-        } else {
-            Network::Testnet11
+    fn report(&mut self, label: &str, result: Result<()>) {
+        if let Err(e) = result {
+            self.set_err(format!("{label}: {e}"));
         }
     }
 
@@ -173,33 +186,50 @@ impl App {
         }
     }
 
-    fn chain_client(&self) -> chia_vault_recover::error::Result<(ChainClient, Network)> {
-        let vault = self.vault_address.trim();
+    fn chain_client(&self) -> Result<(ChainClient, Network)> {
+        let vault = self.receive_address();
         if vault.is_empty() {
-            Ok((
-                ChainClient::new(self.network(), &self.backend()),
-                self.network(),
-            ))
+            Ok((ChainClient::new(self.network, &self.backend()), self.network))
         } else {
-            client_for_vault(vault, self.network(), &self.backend())
+            client_for_vault(vault, self.network, &self.backend())
+        }
+    }
+
+    /// Receive address: session owns it while waiting; otherwise the form field.
+    fn receive_address(&self) -> &str {
+        match &self.phase {
+            Phase::Wait(session) => session.receive_address.as_str(),
+            _ => self.vault_address.trim(),
+        }
+    }
+
+    /// Vault-config path: session is source of truth on Wait.
+    fn vault_config_path(&self) -> &str {
+        match &self.phase {
+            Phase::Wait(session) => session.config_path.as_str(),
+            _ => self.config_path.trim(),
+        }
+    }
+
+    /// Post-recovery config path: session is source of truth on Wait.
+    fn post_recovery_config_path(&self) -> &str {
+        match &self.phase {
+            Phase::Wait(session) => session.post_recovery_path.as_str(),
+            _ => self.post_recovery_path.trim(),
         }
     }
 
     fn cached_vault(&self) -> Option<&CachedLookup> {
-        self.cache.matching(&self.vault_address)
+        self.cache.matching(self.receive_address())
     }
 
     fn config_on_disk(&self) -> bool {
-        let path = self.config_path.trim();
-        !path.is_empty() && PathBuf::from(path).is_file()
+        let path = self.vault_config_path();
+        !path.is_empty() && Path::new(path).is_file()
     }
 
     fn can_start(&self) -> bool {
         self.cached_vault().is_some() || self.config_on_disk()
-    }
-
-    fn can_inspect(&self) -> bool {
-        self.config_on_disk()
     }
 
     fn waiting_session(&self) -> Option<&GuiSession> {
@@ -210,7 +240,7 @@ impl App {
     }
 
     fn rail_step(&self) -> RailStep {
-        match self.phase {
+        match &self.phase {
             Phase::Lookup | Phase::Fallback(_) => RailStep::Lookup,
             Phase::Start => RailStep::Start,
             Phase::Wait(_) | Phase::Done => RailStep::Finish,
@@ -218,16 +248,12 @@ impl App {
     }
 
     fn subtitle(&self) -> &'static str {
-        match self.phase {
+        match &self.phase {
             Phase::Lookup | Phase::Fallback(_) => LOOKUP_SUBTITLE,
             Phase::Start => START_SUBTITLE,
             Phase::Wait(_) => WAIT_SUBTITLE,
             Phase::Done => DONE_SUBTITLE,
         }
-    }
-
-    fn clear_session_disk(&mut self) {
-        GuiSession::clear();
     }
 
     fn reset_to_lookup(&mut self) {
@@ -257,13 +283,14 @@ impl App {
         if let Err(e) = session.save() {
             self.set_ok(format!(
                 "{}. Warning: could not save GUI session for relaunch: {e}",
-                self.status
+                self.status.text()
             ));
         }
+        // Form path fields are for Start/Lookup editing only after this.
         self.phase = Phase::Wait(session);
     }
 
-    fn parsed_clawback(&self) -> chia_vault_recover::error::Result<Option<u64>> {
+    fn parsed_clawback(&self) -> Result<Option<u64>> {
         let trimmed = self.clawback_secs.trim();
         if trimmed.is_empty() {
             Ok(None)
@@ -275,7 +302,7 @@ impl App {
         }
     }
 
-    fn ensure_parent_dir(path: &std::path::Path) -> chia_vault_recover::error::Result<()> {
+    fn ensure_parent_dir(path: &Path) -> Result<()> {
         if let Some(parent) = path.parent()
             && !parent.as_os_str().is_empty()
         {
@@ -321,8 +348,8 @@ impl eframe::App for App {
 
                 ui.add_space(8.0);
                 if !self.status.is_empty() {
-                    theme::status_frame(ui, self.status_is_error).show(ui, |ui| {
-                        ui.label(&self.status);
+                    theme::status_frame(ui, self.status.is_error()).show(ui, |ui| {
+                        ui.label(self.status.text());
                     });
                 }
             });
@@ -341,8 +368,7 @@ fn default_config_paths() -> (String, String) {
 }
 
 fn session_files_ready(session: &GuiSession) -> bool {
-    PathBuf::from(&session.config_path).is_file()
-        && PathBuf::from(&session.post_recovery_path).is_file()
+    Path::new(&session.config_path).is_file() && Path::new(&session.post_recovery_path).is_file()
 }
 
 /// Resume Wait when the cache is empty or names the same receive address.

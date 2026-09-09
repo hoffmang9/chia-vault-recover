@@ -1,12 +1,11 @@
 //! Wizard screen drawing.
 
-use chia_vault_recover::discover::ClawbackGuess;
 use chia_vault_recover::guidance::{CLAWBACK_SECS_HELP, OPTIONAL_CONFIRM_HELP, fallback_guidance};
 use eframe::egui::{self, RichText};
 
-use crate::theme::{self, DANGER, primary_button, secondary_button};
+use crate::theme::{self, DANGER, secondary_button};
 
-use super::{App, Phase, RailStep};
+use super::{App, Phase};
 
 impl App {
     pub(super) fn draw_current_screen(&mut self, ui: &mut egui::Ui) {
@@ -19,80 +18,6 @@ impl App {
         }
     }
 
-    pub(super) fn draw_step_rail(&self, ui: &mut egui::Ui) {
-        let current = self.rail_step();
-        ui.horizontal(|ui| {
-            for (step, label) in [
-                (RailStep::Lookup, "Look up"),
-                (RailStep::Start, "Start"),
-                (RailStep::Finish, "Finish"),
-            ] {
-                let active = step == current;
-                let done = matches!(
-                    (current, step),
-                    (RailStep::Start, RailStep::Lookup)
-                        | (RailStep::Finish, RailStep::Lookup | RailStep::Start)
-                );
-                let text = if active {
-                    RichText::new(label).strong().color(theme::CHIA_GREEN)
-                } else if done {
-                    RichText::new(label).weak()
-                } else {
-                    RichText::new(label)
-                };
-                ui.label(text);
-                if step != RailStep::Finish {
-                    ui.label(RichText::new("→").weak());
-                }
-            }
-        });
-        ui.separator();
-    }
-
-    fn draw_vault_summary(&self, ui: &mut egui::Ui) {
-        theme::card_frame(ui).show(ui, |ui| {
-            ui.strong("Saved vault");
-            let address = self.vault_address.trim();
-            if address.is_empty() {
-                ui.label("No receive address yet.");
-                return;
-            }
-            ui.horizontal(|ui| {
-                ui.label("Address:");
-                ui.monospace(truncate_middle(address, 20, 12));
-            });
-            ui.label(format!(
-                "Network: {}",
-                if self.network_mainnet {
-                    "mainnet"
-                } else {
-                    "testnet11"
-                }
-            ));
-            if let Some(entry) = self.cached_vault() {
-                let launcher = hex::encode(entry.found.launcher_id);
-                ui.horizontal(|ui| {
-                    ui.label("Launcher:");
-                    ui.monospace(format!("0x{}…", &launcher[..8.min(launcher.len())]));
-                });
-                ui.label(clawback_label(entry.clawback));
-            } else if let Some(secs) = self.waiting_session().and_then(|s| s.clawback_secs) {
-                ui.label(format!("Clawback: {secs}s"));
-            }
-        });
-    }
-
-    fn path_row(ui: &mut egui::Ui, path: &mut String) {
-        ui.horizontal(|ui| {
-            ui.text_edit_singleline(path);
-            if secondary_button(ui, "Browse…").clicked()
-                && let Some(picked) = rfd::FileDialog::new().pick_file()
-            {
-                *path = picked.display().to_string();
-            }
-        });
-    }
-
     fn draw_lookup(&mut self, ui: &mut egui::Ui) {
         theme::card_frame(ui).show(ui, |ui| {
             ui.strong("Receive address");
@@ -101,25 +26,10 @@ impl App {
                     .desired_width(f32::INFINITY)
                     .hint_text("xch1… or txch1…"),
             );
-            ui.horizontal(|ui| {
-                ui.label("Network:");
-                if ui
-                    .selectable_label(self.network_mainnet, "Mainnet")
-                    .clicked()
-                {
-                    self.network_mainnet = true;
-                }
-                if ui
-                    .selectable_label(!self.network_mainnet, "Testnet11")
-                    .clicked()
-                {
-                    self.network_mainnet = false;
-                }
-                ui.label(RichText::new("(xch1 / txch1 overrides)").small().weak());
-            });
+            self.network_toggle(ui);
 
             ui.add_space(4.0);
-            if primary_button(ui, "Look up vault").clicked() {
+            if self.primary_action(ui, "Look up vault", true) {
                 self.run_lookup();
             }
         });
@@ -145,7 +55,6 @@ impl App {
     }
 
     fn draw_fallback(&mut self, ui: &mut egui::Ui) {
-        // Copy is &'static / owned String — no need to hold or clone LookupGap across draws.
         let Some((headline, detail, guidance)) = (match &self.phase {
             Phase::Fallback(gap) => Some((gap.headline(), gap.detail(), fallback_guidance(gap))),
             _ => None,
@@ -159,7 +68,7 @@ impl App {
             ui.add_space(6.0);
             ui.label("Preferred: send any amount from the vault back to the same Receive address, wait for confirmation, then look up again.");
             ui.add_space(4.0);
-            if primary_button(ui, "Look up again").clicked() {
+            if self.primary_action(ui, "Look up again", true) {
                 self.run_lookup();
             }
             ui.add_space(4.0);
@@ -179,18 +88,17 @@ impl App {
         self.draw_vault_summary(ui);
         ui.add_space(10.0);
 
-        if !self.can_start() {
-            theme::card_frame(ui).show(ui, |ui| {
-                ui.label("Look up a vault first (or load a vault-config JSON).");
-                if secondary_button(ui, "Back to look up").clicked() {
-                    self.phase = Phase::Lookup;
-                }
-            });
-            return;
-        }
-
+        let can_start = self.can_start();
         theme::card_frame(ui).show(ui, |ui| {
-            if self.cached_vault().is_some() {
+            if !can_start {
+                ui.label(
+                    RichText::new(
+                        "Look up a vault or load a vault-config JSON before starting recovery.",
+                    )
+                    .weak(),
+                );
+                ui.add_space(6.0);
+            } else if self.cached_vault().is_some() {
                 ui.label(
                     RichText::new(
                         "Optional: check clawback now, or enter it when you start. The recovery phrase is never written to disk.",
@@ -253,50 +161,30 @@ impl App {
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if primary_button(ui, "Start recovery").clicked() {
+                if self.primary_action(ui, "Start recovery", can_start) {
                     self.run_start();
                 }
-                if self.can_inspect() && secondary_button(ui, "Inspect").clicked() {
+                if self.config_on_disk() && secondary_button(ui, "Inspect").clicked() {
                     self.run_inspect();
                 }
             });
         });
 
         ui.add_space(8.0);
-        if secondary_button(ui, "Look up a different vault").clicked() {
-            self.reset_to_lookup();
-        }
+        self.draw_different_vault_button(ui);
     }
 
     fn draw_wait_finish(&mut self, ui: &mut egui::Ui) {
         self.draw_vault_summary(ui);
         ui.add_space(10.0);
 
+        // Snapshot session fields so we can mutate self while drawing.
+        let countdown = self.waiting_session().cloned();
+        let can_inspect = self.config_on_disk();
+
         theme::card_frame(ui).show(ui, |ui| {
-            if let Some(remaining) = self
-                .waiting_session()
-                .and_then(|s| s.clawback_remaining_secs())
-            {
-                if remaining > 0 {
-                    ui.label(format!(
-                        "Clawback window: about {} remaining.",
-                        format_duration(remaining as u64)
-                    ));
-                    ui.label(
-                        RichText::new("Old custody can still cancel recovery until this ends.")
-                            .small()
-                            .weak(),
-                    );
-                } else {
-                    ui.colored_label(
-                        theme::CHIA_GREEN,
-                        "Clawback window has elapsed. You can Finish.",
-                    );
-                }
-            } else if let Ok(Some(secs)) = self.parsed_clawback() {
-                ui.label(format!(
-                    "Clawback window: {secs}s (started time unknown — wait that long from Start, then Finish)."
-                ));
+            if let Some(session) = &countdown {
+                self.draw_clawback_countdown(ui, session);
             } else {
                 ui.label("Wait for the clawback window, then Finish recovery.");
             }
@@ -316,10 +204,10 @@ impl App {
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if primary_button(ui, "Finish recovery").clicked() {
+                if self.primary_action(ui, "Finish recovery", true) {
                     self.run_finish();
                 }
-                if self.can_inspect() && secondary_button(ui, "Inspect").clicked() {
+                if can_inspect && secondary_button(ui, "Inspect").clicked() {
                     self.run_inspect();
                 }
             });
@@ -332,9 +220,7 @@ impl App {
         });
 
         ui.add_space(8.0);
-        if secondary_button(ui, "Look up a different vault").clicked() {
-            self.reset_to_lookup();
-        }
+        self.draw_different_vault_button(ui);
     }
 
     fn draw_done(&mut self, ui: &mut egui::Ui) {
@@ -347,43 +233,5 @@ impl App {
                 self.reset_to_lookup();
             }
         });
-    }
-}
-
-fn clawback_label(guess: ClawbackGuess) -> String {
-    match guess {
-        ClawbackGuess::Unknown => "Clawback: not set".into(),
-        ClawbackGuess::Hint(secs) => format!("Clawback: {secs}s (hint)"),
-        ClawbackGuess::Known(secs) => format!("Clawback: {secs}s (verified)"),
-    }
-}
-
-fn truncate_middle(s: &str, head: usize, tail: usize) -> String {
-    let chars: Vec<char> = s.chars().collect();
-    if chars.len() <= head + tail + 1 {
-        return s.to_string();
-    }
-    let left: String = chars.iter().take(head).collect();
-    let right: String = chars
-        .iter()
-        .rev()
-        .take(tail)
-        .collect::<String>()
-        .chars()
-        .rev()
-        .collect();
-    format!("{left}…{right}")
-}
-
-fn format_duration(secs: u64) -> String {
-    let hours = secs / 3600;
-    let mins = (secs % 3600) / 60;
-    let s = secs % 60;
-    if hours > 0 {
-        format!("{hours}h {mins}m")
-    } else if mins > 0 {
-        format!("{mins}m {s}s")
-    } else {
-        format!("{s}s")
     }
 }
