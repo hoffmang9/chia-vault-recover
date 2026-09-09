@@ -4,7 +4,6 @@ use chia_vault_recover::discover::ClawbackGuess;
 use chia_vault_recover::network::Network;
 use eframe::egui::{self, RichText};
 
-use crate::session::GuiSession;
 use crate::theme::{self, muted, muted_small, primary_button, secondary_button};
 
 use super::{App, RailStep};
@@ -92,8 +91,13 @@ impl App {
         }
     }
 
-    pub(super) fn draw_clawback_countdown(&self, ui: &mut egui::Ui, session: &GuiSession) {
-        if let Some(remaining) = session.clawback_remaining_secs() {
+    pub(super) fn draw_clawback_countdown(
+        &self,
+        ui: &mut egui::Ui,
+        remaining: Option<i64>,
+        clawback_secs: Option<u64>,
+    ) {
+        if let Some(remaining) = remaining {
             if remaining > 0 {
                 ui.label(format!(
                     "Clawback window: about {} remaining.",
@@ -108,7 +112,7 @@ impl App {
                     "Clawback window has elapsed. You can Finish.",
                 );
             }
-        } else if let Some(secs) = session.clawback_secs {
+        } else if let Some(secs) = clawback_secs {
             ui.label(format!(
                 "Clawback window: {secs}s (started time unknown — wait that long from Start, then Finish)."
             ));

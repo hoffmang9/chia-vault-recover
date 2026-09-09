@@ -12,6 +12,8 @@ use chia_vault_recover::recovery::VaultPhase;
 use chia_vault_recover::workflow::{self, LookupReport, StartWorkflow};
 use chia_vault_recover::LookupGap;
 
+use crate::session::GuiSession;
+
 use super::{App, Phase, runtime};
 
 impl App {
@@ -19,7 +21,7 @@ impl App {
         let launcher = hex::encode(found.launcher_id);
         let source = found.launcher_source.clone();
         let address = self.vault_address.trim().to_string();
-        crate::session::GuiSession::clear();
+        GuiSession::clear();
         self.generated_recovery_mnemonic = None;
         match self.cache.persist_found(&address, network, found) {
             Ok(_) => {
@@ -78,7 +80,7 @@ impl App {
 
     fn load_existing_config_inner(&mut self) -> Result<()> {
         let config = VaultConfig::load(&self.config_path)?;
-        crate::session::GuiSession::clear();
+        GuiSession::clear();
         self.detail.clear();
         self.phase = Phase::Start;
         self.set_ok(format!(
@@ -261,7 +263,7 @@ impl App {
         let post = VaultConfig::load(&post_path)?;
         let (client, network) = self.chain_client()?;
         let handle = runtime().block_on(workflow::finish(&client, &config, &post, network))?;
-        crate::session::GuiSession::clear();
+        GuiSession::clear();
         self.generated_recovery_mnemonic = None;
         self.phase = Phase::Done;
         self.set_ok(format!(

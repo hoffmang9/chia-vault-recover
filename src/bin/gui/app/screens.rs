@@ -3,7 +3,7 @@
 use chia_vault_recover::guidance::{CLAWBACK_SECS_HELP, OPTIONAL_CONFIRM_HELP, fallback_guidance};
 use eframe::egui;
 
-use crate::theme::{self, DANGER, muted, muted_small, secondary_button};
+use crate::theme::{self, DANGER, muted, muted_small, primary_button, secondary_button};
 
 use super::{App, Phase};
 
@@ -29,7 +29,7 @@ impl App {
             self.network_toggle(ui);
 
             ui.add_space(4.0);
-            if self.primary_action(ui, "Look up vault", true) {
+            if primary_button(ui, "Look up vault").clicked() {
                 self.run_lookup();
             }
         });
@@ -64,7 +64,7 @@ impl App {
             ui.add_space(6.0);
             ui.label("Preferred: send any amount from the vault back to the same Receive address, wait for confirmation, then look up again.");
             ui.add_space(4.0);
-            if self.primary_action(ui, "Look up again", true) {
+            if primary_button(ui, "Look up again").clicked() {
                 self.run_lookup();
             }
             ui.add_space(4.0);
@@ -167,16 +167,14 @@ impl App {
         self.draw_vault_summary(ui);
         ui.add_space(10.0);
 
-        // Snapshot session fields so we can mutate self while drawing.
-        let countdown = self.waiting_session().cloned();
+        let remaining = self
+            .waiting_session()
+            .and_then(|s| s.clawback_remaining_secs());
+        let clawback_secs = self.waiting_session().and_then(|s| s.clawback_secs);
         let can_inspect = self.config_on_disk();
 
         theme::card_frame(ui).show(ui, |ui| {
-            if let Some(session) = &countdown {
-                self.draw_clawback_countdown(ui, session);
-            } else {
-                ui.label("Wait for the clawback window, then Finish recovery.");
-            }
+            self.draw_clawback_countdown(ui, remaining, clawback_secs);
 
             if let Some(words) = self.generated_recovery_mnemonic.clone() {
                 ui.add_space(8.0);
@@ -193,7 +191,7 @@ impl App {
 
             ui.add_space(8.0);
             ui.horizontal(|ui| {
-                if self.primary_action(ui, "Finish recovery", true) {
+                if primary_button(ui, "Finish recovery").clicked() {
                     self.run_finish();
                 }
                 if can_inspect && secondary_button(ui, "Inspect").clicked() {
